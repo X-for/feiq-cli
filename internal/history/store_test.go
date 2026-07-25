@@ -36,6 +36,13 @@ func TestStoreHistoryAndSearchUsers(t *testing.T) {
 	if len(users) != 1 || users[0].IP != "192.168.1.2" || users[0].Count != 2 {
 		t.Fatalf("unexpected users: %#v", users)
 	}
+	targets, err := store.RecentTargets(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0] != "192.168.1.2" {
+		t.Fatalf("unexpected recent targets: %#v", targets)
+	}
 }
 
 func TestHistoryLimitKeepsNewestEntries(t *testing.T) {

@@ -291,7 +291,15 @@ func (s *Session) handleAck(packet Packet) {
 }
 
 func (s *Session) handleIncoming(packet Packet, from *net.UDPAddr) {
-	event := ReceiveEvent{From: from.IP.String(), User: decodeText([]byte(packet.User))}
+	peerIP := from.IP.String()
+	user := decodeText([]byte(packet.User))
+	s.peerMu.RLock()
+	peer := s.peers[peerIP]
+	s.peerMu.RUnlock()
+	if peer.Name != "" {
+		user = peer.Name
+	}
+	event := ReceiveEvent{From: peerIP, User: user}
 	textRaw := packet.Extra
 	if nul := bytes.IndexByte(textRaw, 0); nul >= 0 {
 		textRaw = textRaw[:nul]

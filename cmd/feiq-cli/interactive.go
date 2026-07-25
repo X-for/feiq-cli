@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"feiq-cli/internal/clipboard"
 	"feiq-cli/internal/console"
 	"feiq-cli/internal/history"
 	"feiq-cli/ipmsg"
@@ -25,12 +27,25 @@ type interactiveCommand struct {
 	payload string
 }
 
+var interactiveCommands = []string{
+	"/send msg ",
+	"/send file ",
+	"/send dir ",
+	"/send image ",
+	"/history ",
+	"/search user ",
+	"/help",
+	"/exit",
+	"/quit",
+}
+
 func interactive(args []string) error {
 	fs := flag.NewFlagSet("interactive", flag.ContinueOnError)
 	var common commonFlags
 	common.add(fs)
 	output := fs.String("output", "./downloads", "directory for automatically received files/directories")
 	historyPath := fs.String("history-file", history.DefaultPath(), "local JSONL chat history file")
+	colorMode := fs.String("color", "auto", "terminal colors: auto, always or never")
 	messageWait := fs.Duration("message-wait", 5*time.Second, "time to wait for message acknowledgement")
 	transferWait := fs.Duration("transfer-wait", 5*time.Minute, "time to keep each attachment offer active")
 	if err := fs.Parse(args); err != nil {
@@ -40,21 +55,22 @@ func interactive(args []string) error {
 	if err != nil {
 		return err
 	}
+	recentTargets, err := historyStore.RecentTargets(20)
+	if err != nil {
+		return err
+	}
 
 	terminal, err := console.New(os.Stdin, os.Stdout, "feiq> ")
 	if err != nil {
 		return err
 	}
-	terminal.SetCommands([]string{
-		"/send msg ",
-		"/send file ",
-		"/send dir ",
-		"/history ",
-		"/search user ",
-		"/help",
-		"/exit",
-		"/quit",
-	})
+	if err := terminal.SetColorMode(*colorMode); err != nil {
+		_ = terminal.Close()
+		return err
+	}
+	terminal.SetCommands(interactiveCommands)
+	terminal.SetCompleter(interactiveCompletions)
+	terminal.SetTargets(recentTargets)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	var sendWG sync.WaitGroup
 	session, err := common.node().StartSession(
@@ -62,11 +78,11 @@ func interactive(args []string) error {
 		*output,
 		func(event ipmsg.ReceiveEvent) {
 			recordReceiveEvent(historyStore, event, func(err error) {
-				terminal.Printf("[%s] [历史记录错误] %v", clock(), err)
+				terminal.PrintfColor(console.ColorRed, "[%s] [历史记录错误] %v", clock(), err)
 			})
 			printReceiveEvent(terminal, event)
 		},
-		func(err error) { terminal.Printf("[%s] [错误] %v", clock(), err) },
+		func(err error) { terminal.PrintfColor(console.ColorRed, "[%s] [错误] %v", clock(), err) },
 	)
 	if err != nil {
 		cancel()
@@ -80,9 +96,9 @@ func interactive(args []string) error {
 		_ = terminal.Close()
 	}()
 
-	terminal.Printf("[%s] feiq-cli 已启动，监听 %s:%d，附件保存到 %s", clock(), common.bind, common.port, *output)
-	terminal.Printf("聊天记录保存到 %s", historyStore.Path())
-	terminal.Printf("输入 /help 查看交互命令，输入 exit 退出")
+	terminal.PrintfColor(console.ColorBlue, "[%s] feiq-cli 已启动，监听 %s:%d，附件保存到 %s", clock(), common.bind, common.port, *output)
+	terminal.PrintfColor(console.ColorGray, "聊天记录保存到 %s", historyStore.Path())
+	terminal.PrintfColor(console.ColorBlue, "输入 /help 查看交互命令，输入 exit 退出")
 	for {
 		line, err := terminal.ReadLine()
 		if errors.Is(err, console.ErrInterrupt) || errors.Is(err, io.EOF) {
@@ -93,7 +109,7 @@ func interactive(args []string) error {
 		}
 		command, err := parseInteractiveCommand(line)
 		if err != nil {
-			terminal.Printf("[%s] [命令错误] %v", clock(), err)
+			terminal.PrintfColor(console.ColorRed, "[%s] [命令错误] %v", clock(), err)
 			continue
 		}
 		switch command.kind {
@@ -110,8 +126,9 @@ func interactive(args []string) error {
 			time.Sleep(350 * time.Millisecond)
 			printUsers(terminal, historyStore, session, command.payload)
 		case "msg":
+			terminal.RememberTarget(command.target)
 			appendHistory(terminal, historyStore, history.Entry{Direction: "out", PeerIP: command.target, Kind: "msg", Content: command.payload})
-			terminal.Printf("[%s] [我 -> %s] 消息: %s", clock(), command.target, command.payload)
+			terminal.PrintfColor(console.ColorCyan, "[%s] [我 -> %s] 消息: %s", clock(), command.target, command.payload)
 			sendWG.Add(1)
 			go func(command interactiveCommand) {
 				defer sendWG.Done()
@@ -119,34 +136,63 @@ func interactive(args []string) error {
 				defer stop()
 				acked, err := session.SendMessage(sendCtx, command.target, command.payload)
 				if err != nil {
-					terminal.Printf("[%s] [发送失败 -> %s] %v", clock(), command.target, err)
+					terminal.PrintfColor(console.ColorRed, "[%s] [发送失败 -> %s] %v", clock(), command.target, err)
 				} else if acked {
-					terminal.Printf("[%s] [已送达 -> %s] 对方已确认接收", clock(), command.target)
+					terminal.PrintfColor(console.ColorGreen, "[%s] [已送达 -> %s] 对方已确认接收", clock(), command.target)
 				} else {
-					terminal.Printf("[%s] [未确认 -> %s] 回执等待超时", clock(), command.target)
+					terminal.PrintfColor(console.ColorYellow, "[%s] [未确认 -> %s] 回执等待超时", clock(), command.target)
 				}
 			}(command)
+		case "image":
+			terminal.RememberTarget(command.target)
+			file, err := os.CreateTemp("", "feiq-clipboard-*.png")
+			if err != nil {
+				terminal.PrintfColor(console.ColorRed, "[%s] [图片发送失败] %v", clock(), err)
+				continue
+			}
+			imagePath := file.Name()
+			_ = file.Close()
+			if err := clipboard.SavePNG(imagePath); err != nil {
+				_ = os.Remove(imagePath)
+				terminal.PrintfColor(console.ColorRed, "[%s] [图片发送失败] %v", clock(), err)
+				continue
+			}
+			appendHistory(terminal, historyStore, history.Entry{Direction: "out", PeerIP: command.target, Kind: "file", Content: "剪贴板图片"})
+			terminal.PrintfColor(console.ColorMagenta, "[%s] [我 -> %s] 图片: 剪贴板图片（等待对方接收）", clock(), command.target)
+			sendWG.Add(1)
+			go func(target, path string) {
+				defer sendWG.Done()
+				defer os.Remove(path)
+				sendCtx, stop := context.WithTimeout(ctx, *transferWait)
+				defer stop()
+				if err := session.SendPath(sendCtx, target, path); err != nil {
+					terminal.PrintfColor(console.ColorRed, "[%s] [图片发送失败 -> %s] %v", clock(), target, err)
+					return
+				}
+				terminal.PrintfColor(console.ColorGreen, "[%s] [图片发送完成 -> %s]", clock(), target)
+			}(command.target, imagePath)
 		case "file", "dir":
 			if err := validateInteractivePath(command.kind, command.payload); err != nil {
-				terminal.Printf("[%s] [命令错误] %v", clock(), err)
+				terminal.PrintfColor(console.ColorRed, "[%s] [命令错误] %v", clock(), err)
 				continue
 			}
 			label := "文件"
 			if command.kind == "dir" {
 				label = "目录"
 			}
+			terminal.RememberTarget(command.target)
 			appendHistory(terminal, historyStore, history.Entry{Direction: "out", PeerIP: command.target, Kind: command.kind, Content: command.payload})
-			terminal.Printf("[%s] [我 -> %s] %s: %s（等待对方接收）", clock(), command.target, label, command.payload)
+			terminal.PrintfColor(console.ColorMagenta, "[%s] [我 -> %s] %s: %s（等待对方接收）", clock(), command.target, label, command.payload)
 			sendWG.Add(1)
 			go func(command interactiveCommand, label string) {
 				defer sendWG.Done()
 				sendCtx, stop := context.WithTimeout(ctx, *transferWait)
 				defer stop()
 				if err := session.SendPath(sendCtx, command.target, command.payload); err != nil {
-					terminal.Printf("[%s] [%s发送失败 -> %s] %v", clock(), label, command.target, err)
+					terminal.PrintfColor(console.ColorRed, "[%s] [%s发送失败 -> %s] %v", clock(), label, command.target, err)
 					return
 				}
-				terminal.Printf("[%s] [%s发送完成 -> %s] %s", clock(), label, command.target, command.payload)
+				terminal.PrintfColor(console.ColorGreen, "[%s] [%s发送完成 -> %s] %s", clock(), label, command.target, command.payload)
 			}(command, label)
 		}
 	}
@@ -182,12 +228,18 @@ func parseInteractiveCommand(line string) (interactiveCommand, error) {
 		return interactiveCommand{}, fmt.Errorf("未知命令；输入 /help 查看用法")
 	}
 	kind, rest := cutInteractiveField(rest)
-	if kind != "msg" && kind != "file" && kind != "dir" {
-		return interactiveCommand{}, fmt.Errorf("发送类型必须是 msg、file 或 dir")
+	if kind != "msg" && kind != "file" && kind != "dir" && kind != "image" {
+		return interactiveCommand{}, fmt.Errorf("发送类型必须是 msg、file、dir 或 image")
 	}
 	target, payload := cutInteractiveField(rest)
 	if target == "" {
 		return interactiveCommand{}, fmt.Errorf("目标地址不能为空")
+	}
+	if kind == "image" {
+		if payload != "" {
+			return interactiveCommand{}, fmt.Errorf("用法: /send image <IP>")
+		}
+		return interactiveCommand{kind: kind, target: target}, nil
 	}
 	if unquoted, err := strconv.Unquote(payload); err == nil {
 		payload = unquoted
@@ -209,6 +261,78 @@ func cutInteractiveField(input string) (string, string) {
 	return input, ""
 }
 
+func interactiveCompletions(line string) []string {
+	var commands []string
+	for _, command := range interactiveCommands {
+		if strings.HasPrefix(command, line) {
+			commands = append(commands, command)
+		}
+	}
+	if len(commands) > 0 {
+		return commands
+	}
+	command, rest := cutInteractiveField(line)
+	kind, rest := cutInteractiveField(rest)
+	target, _ := cutInteractiveField(rest)
+	if command != "/send" || target == "" || kind != "file" && kind != "dir" {
+		return nil
+	}
+	targetAt := strings.Index(line, target)
+	if targetAt < 0 {
+		return nil
+	}
+	prefixEnd := targetAt + len(target)
+	commandPrefix := line[:prefixEnd] + " "
+	pathInput := strings.TrimSpace(line[prefixEnd:])
+	return completeLocalPaths(commandPrefix, pathInput, kind == "dir")
+}
+
+func completeLocalPaths(commandPrefix, input string, directoriesOnly bool) []string {
+	input = strings.TrimSpace(input)
+	if unquoted, err := strconv.Unquote(input); err == nil {
+		input = unquoted
+	} else {
+		input = strings.TrimPrefix(input, "\"")
+		input = strings.TrimSuffix(input, "\"")
+	}
+	expanded := input
+	if expanded == "~" || strings.HasPrefix(expanded, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			expanded = filepath.Join(home, strings.TrimPrefix(expanded, "~/"))
+		}
+	}
+	directory := filepath.Dir(expanded)
+	base := filepath.Base(expanded)
+	displayDirectory := filepath.Dir(input)
+	if input == "" {
+		directory, base, displayDirectory = ".", "", "."
+	} else if strings.HasSuffix(input, string(os.PathSeparator)) {
+		directory, base, displayDirectory = expanded, "", input
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+	var result []string
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), base) || directoriesOnly && !entry.IsDir() {
+			continue
+		}
+		candidate := entry.Name()
+		if displayDirectory != "." {
+			candidate = filepath.Join(displayDirectory, candidate)
+		}
+		if entry.IsDir() {
+			candidate += string(os.PathSeparator)
+		}
+		if strings.ContainsAny(candidate, " \t") {
+			candidate = strconv.Quote(candidate)
+		}
+		result = append(result, commandPrefix+candidate)
+	}
+	return result
+}
+
 func validateInteractivePath(kind, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -225,7 +349,7 @@ func validateInteractivePath(kind, path string) error {
 
 func printReceiveEvent(terminal *console.Terminal, event ipmsg.ReceiveEvent) {
 	if event.Text != "" {
-		terminal.Printf("[%s] [%s %s] 消息: %s", clock(), event.User, event.From, event.Text)
+		terminal.PrintfColor(console.ColorGreen, "[%s] [%s %s] 消息: %s", clock(), event.User, event.From, event.Text)
 	}
 	for index, attachment := range event.Attachments {
 		label := "文件"
@@ -233,20 +357,20 @@ func printReceiveEvent(terminal *console.Terminal, event ipmsg.ReceiveEvent) {
 			label = "目录"
 		}
 		if index < len(event.SavedPaths) {
-			terminal.Printf("[%s] [%s %s] 收到%s: %s -> %s", clock(), event.User, event.From, label, attachment.Name, event.SavedPaths[index])
+			terminal.PrintfColor(console.ColorMagenta, "[%s] [%s %s] 收到%s: %s -> %s", clock(), event.User, event.From, label, attachment.Name, event.SavedPaths[index])
 		} else {
-			terminal.Printf("[%s] [%s %s] 收到%s通知: %s（下载未完成）", clock(), event.User, event.From, label, attachment.Name)
+			terminal.PrintfColor(console.ColorYellow, "[%s] [%s %s] 收到%s通知: %s（下载未完成）", clock(), event.User, event.From, label, attachment.Name)
 		}
 	}
 }
 
 func printInteractiveHelp(terminal *console.Terminal) {
-	terminal.Printf("交互命令:\n  /send msg  <IP> <消息>\n  /send file <IP> <文件路径>\n  /send dir  <IP> <目录路径>\n  /history <IP>\n  /search user [关键词]\n  /help\n  exit（也支持 quit、/exit、/quit）")
+	terminal.PrintfColor(console.ColorBlue, "交互命令:\n  /send msg   <IP> <消息>\n  /send file  <IP> <文件路径>\n  /send dir   <IP> <目录路径>\n  /send image <IP>\n  /history <IP>\n  /search user [关键词]\n  /help\n  exit（也支持 quit、/exit、/quit）")
 }
 
 func appendHistory(terminal *console.Terminal, store *history.Store, entry history.Entry) {
 	if err := store.Append(entry); err != nil {
-		terminal.Printf("[%s] [历史记录错误] %v", clock(), err)
+		terminal.PrintfColor(console.ColorRed, "[%s] [历史记录错误] %v", clock(), err)
 	}
 }
 
@@ -274,14 +398,14 @@ func recordReceiveEvent(store *history.Store, event ipmsg.ReceiveEvent, onError 
 func printHistory(terminal *console.Terminal, store *history.Store, peerIP string) {
 	entries, err := store.History(peerIP, 50)
 	if err != nil {
-		terminal.Printf("[%s] [历史记录错误] %v", clock(), err)
+		terminal.PrintfColor(console.ColorRed, "[%s] [历史记录错误] %v", clock(), err)
 		return
 	}
 	if len(entries) == 0 {
-		terminal.Printf("没有找到与 %s 的本地聊天记录", peerIP)
+		terminal.PrintfColor(console.ColorYellow, "没有找到与 %s 的本地聊天记录", peerIP)
 		return
 	}
-	terminal.Printf("与 %s 最近的 %d 条记录:", peerIP, len(entries))
+	terminal.PrintfColor(console.ColorBlue, "与 %s 最近的 %d 条记录:", peerIP, len(entries))
 	for _, entry := range entries {
 		arrow := "我 ->"
 		if entry.Direction == "in" {
@@ -291,7 +415,7 @@ func printHistory(terminal *console.Terminal, store *history.Store, peerIP strin
 		if entry.SavedPath != "" {
 			content += " -> " + entry.SavedPath
 		}
-		terminal.Printf("[%s] [%s] %s: %s", entry.Time.Local().Format("2006-01-02 15:04:05"), arrow, historyKindLabel(entry.Kind), content)
+		terminal.PrintfColor(console.ColorGray, "[%s] [%s] %s: %s", entry.Time.Local().Format("2006-01-02 15:04:05"), arrow, historyKindLabel(entry.Kind), content)
 	}
 }
 
@@ -299,15 +423,15 @@ func printUsers(terminal *console.Terminal, store *history.Store, session *ipmsg
 	peers := session.SearchPeers(query)
 	users, err := store.SearchUsers(query)
 	if err != nil {
-		terminal.Printf("[%s] [历史记录错误] %v", clock(), err)
+		terminal.PrintfColor(console.ColorRed, "[%s] [历史记录错误] %v", clock(), err)
 		return
 	}
 	if len(peers) == 0 && len(users) == 0 {
-		terminal.Printf("没有发现匹配的在线用户，本地记录中也没有匹配用户")
+		terminal.PrintfColor(console.ColorYellow, "没有发现匹配的在线用户，本地记录中也没有匹配用户")
 		return
 	}
 	for _, peer := range peers {
-		terminal.Printf("[在线] %s  %s  主机 %s", peer.IP, peer.Name, peer.Host)
+		terminal.PrintfColor(console.ColorGreen, "[在线] %s  %s  主机 %s", peer.IP, peer.Name, peer.Host)
 	}
 	online := make(map[string]bool, len(peers))
 	for _, peer := range peers {
@@ -321,7 +445,7 @@ func printUsers(terminal *console.Terminal, store *history.Store, session *ipmsg
 		if name == "" {
 			name = "未知名称"
 		}
-		terminal.Printf("[本地] %s  %s  最近联系 %s  %d 条记录", user.IP, name, user.LastSeen.Local().Format("2006-01-02 15:04"), user.Count)
+		terminal.PrintfColor(console.ColorGray, "[本地] %s  %s  最近联系 %s  %d 条记录", user.IP, name, user.LastSeen.Local().Format("2006-01-02 15:04"), user.Count)
 	}
 }
 

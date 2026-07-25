@@ -135,6 +135,27 @@ func (s *Store) SearchUsers(query string) ([]User, error) {
 	return result, nil
 }
 
+func (s *Store) RecentTargets(limit int) ([]string, error) {
+	entries, err := s.readAll()
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var targets []string
+	for index := len(entries) - 1; index >= 0; index-- {
+		entry := entries[index]
+		if entry.Direction != "out" || entry.PeerIP == "" || seen[entry.PeerIP] {
+			continue
+		}
+		seen[entry.PeerIP] = true
+		targets = append(targets, entry.PeerIP)
+		if limit > 0 && len(targets) >= limit {
+			break
+		}
+	}
+	return targets, nil
+}
+
 func (s *Store) readAll() ([]Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

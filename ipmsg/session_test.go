@@ -118,6 +118,18 @@ func TestIsLocalIP(t *testing.T) {
 	}
 }
 
+func TestIncomingMessagePrefersDiscoveredNickname(t *testing.T) {
+	var event ReceiveEvent
+	session := &Session{
+		peers:   map[string]Peer{"192.0.2.10": {IP: "192.0.2.10", Name: "显示昵称"}},
+		onEvent: func(received ReceiveEvent) { event = received },
+	}
+	session.handleIncoming(Packet{User: "Administrator", Extra: []byte("hello")}, &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 2425})
+	if event.User != "显示昵称" || event.Text != "hello" {
+		t.Fatalf("unexpected event: %#v", event)
+	}
+}
+
 func startTestSession(t *testing.T, port int, output string) (*Session, <-chan ReceiveEvent, <-chan error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
