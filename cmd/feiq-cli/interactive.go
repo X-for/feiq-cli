@@ -45,6 +45,16 @@ func interactive(args []string) error {
 	if err != nil {
 		return err
 	}
+	terminal.SetCommands([]string{
+		"/send msg ",
+		"/send file ",
+		"/send dir ",
+		"/history ",
+		"/search user ",
+		"/help",
+		"/exit",
+		"/quit",
+	})
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	var sendWG sync.WaitGroup
 	session, err := common.node().StartSession(

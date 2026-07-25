@@ -21,10 +21,15 @@ go version
 
 ## 拉取项目
 
-将下面的地址替换为你自己的仓库地址：
+```bash
+git clone git@github.com:X-for/feiq-cli.git
+cd feiq-cli
+```
+
+如果没有配置 GitHub SSH 密钥，也可以使用 HTTPS：
 
 ```bash
-git clone <repository-url> feiq-cli
+git clone https://github.com/X-for/feiq-cli.git
 cd feiq-cli
 ```
 
@@ -69,6 +74,8 @@ go install ./cmd/feiq-cli
 /send file 192.168.110.150 ./example.txt
 /send dir  192.168.110.150 ./example-directory
 ```
+
+输入 `/` 会立即显示全部交互命令。继续输入命令前缀并按 `Tab`，可以自动补全唯一匹配项；存在多个匹配项时会显示候选命令并补全公共前缀。
 
 文件路径包含空格时可以使用双引号：
 

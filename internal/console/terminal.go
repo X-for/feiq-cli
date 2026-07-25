@@ -26,10 +26,17 @@ type Terminal struct {
 	interactive bool
 	oldState    *term.State
 
-	mu      sync.Mutex
-	line    []rune
-	reading bool
-	closed  bool
+	mu       sync.Mutex
+	line     []rune
+	reading  bool
+	closed   bool
+	commands []string
+}
+
+func (t *Terminal) SetCommands(commands []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.commands = append([]string(nil), commands...)
 }
 
 func New(in *os.File, out io.Writer, prompt string) (*Terminal, error) {
@@ -116,6 +123,10 @@ func (t *Terminal) ReadLine() (string, error) {
 				t.redrawLocked()
 			}
 			t.mu.Unlock()
+		case 9: // Tab completes the current command prefix.
+			t.mu.Lock()
+			t.completeLocked()
+			t.mu.Unlock()
 		case 21: // Ctrl-U clears the current input.
 			t.mu.Lock()
 			t.line = t.line[:0]
@@ -137,7 +148,11 @@ func (t *Terminal) ReadLine() (string, error) {
 			encoded = encoded[size:]
 			t.mu.Lock()
 			t.line = append(t.line, r)
-			t.redrawLocked()
+			if string(t.line) == "/" {
+				t.showCompletionsLocked(t.matchingCommandsLocked("/"))
+			} else {
+				t.redrawLocked()
+			}
 			t.mu.Unlock()
 		}
 	}
@@ -172,6 +187,63 @@ func (t *Terminal) redrawLocked() {
 	_, _ = io.WriteString(t.out, "\r\x1b[2K")
 	_, _ = io.WriteString(t.out, t.prompt)
 	_, _ = io.WriteString(t.out, string(t.line))
+}
+
+func (t *Terminal) completeLocked() {
+	prefix := string(t.line)
+	matches := t.matchingCommandsLocked(prefix)
+	if len(matches) == 0 {
+		t.redrawLocked()
+		return
+	}
+	completion := commonPrefix(matches)
+	if len(matches) == 1 {
+		completion = matches[0]
+	}
+	if len(completion) > len(prefix) {
+		t.line = []rune(completion)
+	}
+	t.showCompletionsLocked(matches)
+}
+
+func (t *Terminal) matchingCommandsLocked(prefix string) []string {
+	var matches []string
+	for _, command := range t.commands {
+		if strings.HasPrefix(command, prefix) {
+			matches = append(matches, command)
+		}
+	}
+	return matches
+}
+
+func (t *Terminal) showCompletionsLocked(commands []string) {
+	if len(commands) == 0 {
+		t.redrawLocked()
+		return
+	}
+	display := make([]string, len(commands))
+	for index, command := range commands {
+		display[index] = strings.TrimSpace(command)
+	}
+	_, _ = io.WriteString(t.out, "\r\x1b[2K")
+	_, _ = io.WriteString(t.out, "可用命令: "+strings.Join(display, "  ")+"\r\n")
+	t.redrawLocked()
+}
+
+func commonPrefix(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	prefix := values[0]
+	for _, value := range values[1:] {
+		for !strings.HasPrefix(value, prefix) {
+			if prefix == "" {
+				return ""
+			}
+			prefix = prefix[:len(prefix)-1]
+		}
+	}
+	return prefix
 }
 
 func trimLineEnding(line string) string {
