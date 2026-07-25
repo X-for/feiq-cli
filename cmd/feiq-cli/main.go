@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,8 +41,11 @@ func (c commonFlags) node() *ipmsg.Node {
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		if err := interactive(nil); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	var err error
 	switch os.Args[1] {
@@ -56,7 +60,11 @@ func main() {
 	case "help", "-h", "--help":
 		usage()
 	default:
-		err = fmt.Errorf("unknown command %q", os.Args[1])
+		if strings.HasPrefix(os.Args[1], "-") {
+			err = interactive(os.Args[1:])
+		} else {
+			err = fmt.Errorf("unknown command %q", os.Args[1])
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -161,6 +169,7 @@ func usage() {
 	fmt.Print(`feiq-cli - standalone IP Messenger/FeiQ command line tool
 
 Usage:
+	feiq-cli                                             interactive mode
   feiq-cli send-message --to IP --text TEXT [options]
   feiq-cli send-file    --to IP --path FILE [options]
   feiq-cli send-dir     --to IP --path DIRECTORY [options]

@@ -166,71 +166,89 @@ func (n *Node) SendPath(ctx context.Context, target, path string) error {
 }
 
 func (n *Node) servePathRequest(conn net.Conn, packetNo, fileID uint64, path string, directory bool) error {
+	request, err := readTransferRequest(conn)
+	if err != nil {
+		return err
+	}
+	if request.fileID != fileID {
+		return fmt.Errorf(
+			"request does not match offered path (packet=%q file=%x, offered packet=%d file=%x)",
+			request.packetText, request.fileID, packetNo, fileID,
+		)
+	}
+	return sendTransferData(conn, request, path, directory)
+}
+
+type transferRequest struct {
+	command    uint64
+	packetText string
+	fileID     uint64
+	offset     int64
+}
+
+func readTransferRequest(conn net.Conn) (transferRequest, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	raw, err := bufio.NewReader(conn).ReadBytes(0)
 	if err != nil && len(raw) == 0 {
-		return fmt.Errorf("read transfer request: %w", err)
+		return transferRequest{}, fmt.Errorf("read transfer request: %w", err)
 	}
 	// Some FeiQ variants omit the trailing NUL on TCP transfer requests.
 	// ReadBytes returns the already received packet together with a timeout or
 	// EOF in that case, and DecodePacket intentionally accepts either form.
 	request, err := DecodePacket(raw)
 	if err != nil {
-		return err
+		return transferRequest{}, err
 	}
 	fields := bytes.Split(request.Extra, []byte{':'})
 	if len(fields) < 3 {
-		return fmt.Errorf("invalid transfer request")
+		return transferRequest{}, fmt.Errorf("invalid transfer request")
 	}
 	requestPacketText := string(fields[0])
-	requestPacket, err := strconv.ParseUint(requestPacketText, 16, 64)
-	if err != nil {
-		return fmt.Errorf("invalid requested packet number: %w", err)
+	if _, err := strconv.ParseUint(requestPacketText, 16, 64); err != nil {
+		return transferRequest{}, fmt.Errorf("invalid requested packet number: %w", err)
 	}
 	requestFile, err := strconv.ParseUint(string(fields[1]), 16, 64)
 	if err != nil {
-		return fmt.Errorf("invalid requested file id: %w", err)
+		return transferRequest{}, fmt.Errorf("invalid requested file id: %w", err)
 	}
 	var offset int64
 	if len(fields[2]) > 0 {
 		offset, err = strconv.ParseInt(string(fields[2]), 16, 64)
 		if err != nil {
-			return fmt.Errorf("invalid requested offset: %w", err)
+			return transferRequest{}, fmt.Errorf("invalid requested offset: %w", err)
 		}
 	} else if CommandMode(request.Command) != CmdGetDirFiles {
-		return fmt.Errorf("file request omitted its offset")
+		return transferRequest{}, fmt.Errorf("file request omitted its offset")
 	}
-	if requestFile != fileID {
-		return fmt.Errorf(
-			"request does not match offered path (packet=%q file=%x, offered packet=%d file=%x)",
-			requestPacketText, requestFile, packetNo, fileID,
-		)
-	}
-	// FeiQ can queue attachment notifications and later request an older
-	// packet number. SendPath has already restricted this TCP connection to
-	// the intended target IP, so a matching file id is sufficient for this
-	// one-path server.
-	_ = requestPacket
+	return transferRequest{
+		command:    request.Command,
+		packetText: requestPacketText,
+		fileID:     requestFile,
+		offset:     offset,
+	}, nil
+}
+
+func sendTransferData(conn net.Conn, request transferRequest, path string, directory bool) error {
 	_ = conn.SetReadDeadline(time.Time{})
 	_ = conn.SetWriteDeadline(time.Time{})
 	if directory {
-		if CommandMode(request.Command) != CmdGetDirFiles {
-			return fmt.Errorf("expected GETDIRFILES, got %#x", request.Command)
+		if CommandMode(request.command) != CmdGetDirFiles {
+			return fmt.Errorf("expected GETDIRFILES, got %#x", request.command)
 		}
-		if offset != 0 {
+		if request.offset != 0 {
 			return fmt.Errorf("directory resume offsets are not supported")
 		}
 		return writeDirectoryStream(conn, path)
 	}
-	if CommandMode(request.Command) != CmdGetFileData {
-		return fmt.Errorf("expected GETFILEDATA, got %#x", request.Command)
+	if CommandMode(request.command) != CmdGetFileData {
+		return fmt.Errorf("expected GETFILEDATA, got %#x", request.command)
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+	if _, err := file.Seek(request.offset, io.SeekStart); err != nil {
 		return err
 	}
 	_, err = io.Copy(conn, file)
@@ -300,6 +318,15 @@ func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort
 		return "", fmt.Errorf("connect to attachment sender: %w", err)
 	}
 	defer conn.Close()
+	stopClose := make(chan struct{})
+	defer close(stopClose)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopClose:
+		}
+	}()
 	command := uint64(CmdGetFileData)
 	if attachment.Attr&0xff == FileDirectory {
 		command = CmdGetDirFiles
