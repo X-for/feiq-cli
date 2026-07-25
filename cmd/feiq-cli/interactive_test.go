@@ -13,6 +13,9 @@ func TestParseInteractiveCommand(t *testing.T) {
 		{"  /send   msg  192.168.1.2   spaced message  ", "msg", "192.168.1.2", "spaced message"},
 		{"/send file 192.168.1.2 \"/tmp/a file.txt\"", "file", "192.168.1.2", "/tmp/a file.txt"},
 		{"/send dir 192.168.1.2 ./folder", "dir", "192.168.1.2", "./folder"},
+		{"/history 192.168.1.2", "history", "192.168.1.2", ""},
+		{"/search user", "search-user", "", ""},
+		{"/search user alice", "search-user", "", "alice"},
 		{"exit", "quit", "", ""},
 		{"quit", "quit", "", ""},
 		{"/exit", "quit", "", ""},
@@ -30,7 +33,7 @@ func TestParseInteractiveCommand(t *testing.T) {
 }
 
 func TestParseInteractiveCommandRejectsInvalidInput(t *testing.T) {
-	for _, line := range []string{"hello", "/send", "/send image 127.0.0.1 x"} {
+	for _, line := range []string{"hello", "/send", "/send image 127.0.0.1 x", "/history", "/history 1.2.3.4 extra", "/search", "/search group"} {
 		if _, err := parseInteractiveCommand(line); err == nil {
 			t.Fatalf("%q should fail", line)
 		}

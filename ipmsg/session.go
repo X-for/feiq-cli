@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Session owns one UDP socket and one TCP listener so a long-running process
@@ -32,6 +35,16 @@ type Session struct {
 	offerMu sync.Mutex
 	offers  map[string]*sessionOffer
 	fileSeq atomic.Uint64
+
+	peerMu sync.RWMutex
+	peers  map[string]Peer
+}
+
+type Peer struct {
+	IP       string
+	Name     string
+	Host     string
+	LastSeen time.Time
 }
 
 type sessionOffer struct {
@@ -72,10 +85,12 @@ func (n *Node) StartSession(
 		cancel:     cancel,
 		ackWaiters: make(map[uint64]chan struct{}),
 		offers:     make(map[string]*sessionOffer),
+		peers:      make(map[string]Peer),
 	}
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.udpLoop()
 	go s.tcpLoop()
+	go s.discoveryLoop()
 	go func() {
 		<-ctx.Done()
 		_ = udp.Close()
@@ -85,12 +100,35 @@ func (n *Node) StartSession(
 }
 
 func (s *Session) Close() {
+	s.broadcastPresence(CmdBrExit)
 	s.cancel()
 	s.wg.Wait()
 }
 
 func (s *Session) Done() <-chan struct{} {
 	return s.ctx.Done()
+}
+
+func (s *Session) Discover() error {
+	return s.broadcastPresence(CmdBrEntry)
+}
+
+func (s *Session) SearchPeers(query string) []Peer {
+	query = strings.ToLower(strings.TrimSpace(query))
+	cutoff := time.Now().Add(-3 * time.Minute)
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	peers := make([]Peer, 0, len(s.peers))
+	for _, peer := range s.peers {
+		if peer.LastSeen.Before(cutoff) {
+			continue
+		}
+		if query == "" || strings.Contains(strings.ToLower(peer.IP), query) || strings.Contains(strings.ToLower(peer.Name), query) || strings.Contains(strings.ToLower(peer.Host), query) {
+			peers = append(peers, peer)
+		}
+	}
+	sortPeers(peers)
+	return peers
 }
 
 func (s *Session) SendMessage(ctx context.Context, target, message string) (bool, error) {
@@ -201,6 +239,18 @@ func (s *Session) udpLoop() {
 			continue
 		}
 		switch CommandMode(packet.Command) {
+		case CmdBrEntry:
+			s.recordPeer(packet, from)
+			answer := EncodePacket(s.node.Identity, s.node.nextPacketNo(), CmdAnsEntry, encodeText(s.node.Identity.Name))
+			if _, err := s.udp.WriteToUDP(answer, from); err != nil {
+				s.reportError(err)
+			}
+		case CmdAnsEntry:
+			s.recordPeer(packet, from)
+		case CmdBrExit:
+			s.peerMu.Lock()
+			delete(s.peers, from.IP.String())
+			s.peerMu.Unlock()
 		case CmdRecvMsg:
 			s.handleAck(packet)
 		case CmdSendMsg:
@@ -330,6 +380,121 @@ func (s *Session) reportError(err error) {
 	if err != nil && s.onError != nil {
 		s.onError(err)
 	}
+}
+
+func (s *Session) discoveryLoop() {
+	defer s.wg.Done()
+	_ = s.Discover()
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			_ = s.Discover()
+		case <-s.ctx.Done():
+			return
+		}
+	}
+}
+
+func (s *Session) recordPeer(packet Packet, from *net.UDPAddr) {
+	if isLocalIP(from.IP) {
+		return
+	}
+	name := decodeText([]byte(packet.User))
+	if extra := bytes.TrimRight(packet.Extra, "\x00"); len(extra) > 0 {
+		if nul := bytes.IndexByte(extra, 0); nul >= 0 {
+			extra = extra[:nul]
+		}
+		if decoded := decodeText(extra); decoded != "" {
+			name = decoded
+		}
+	}
+	peer := Peer{IP: from.IP.String(), Name: name, Host: decodeText([]byte(packet.Host)), LastSeen: time.Now()}
+	s.peerMu.Lock()
+	s.peers[peer.IP] = peer
+	s.peerMu.Unlock()
+}
+
+func isLocalIP(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return true
+	}
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, address := range addresses {
+		var local net.IP
+		switch value := address.(type) {
+		case *net.IPNet:
+			local = value.IP
+		case *net.IPAddr:
+			local = value.IP
+		}
+		if local != nil && local.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Session) broadcastPresence(command uint64) error {
+	packet := EncodePacket(s.node.Identity, s.node.nextPacketNo(), command, encodeText(s.node.Identity.Name))
+	targets := broadcastTargets(s.node.Port)
+	var lastErr error
+	sent := false
+	for _, target := range targets {
+		if _, err := s.udp.WriteToUDP(packet, target); err != nil {
+			lastErr = err
+			continue
+		}
+		sent = true
+	}
+	if !sent {
+		return lastErr
+	}
+	return nil
+}
+
+func broadcastTargets(port int) []*net.UDPAddr {
+	seen := make(map[string]bool)
+	add := func(ip net.IP, targets *[]*net.UDPAddr) {
+		key := ip.String()
+		if !seen[key] {
+			seen[key] = true
+			*targets = append(*targets, &net.UDPAddr{IP: ip, Port: port})
+		}
+	}
+	var targets []*net.UDPAddr
+	add(net.IPv4bcast, &targets)
+	interfaces, _ := net.Interfaces()
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagBroadcast == 0 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, address := range addrs {
+			network, ok := address.(*net.IPNet)
+			if !ok || network.IP.To4() == nil {
+				continue
+			}
+			ip := network.IP.To4()
+			mask := network.Mask
+			broadcast := net.IPv4(ip[0]|^mask[0], ip[1]|^mask[1], ip[2]|^mask[2], ip[3]|^mask[3])
+			add(broadcast, &targets)
+		}
+	}
+	return targets
+}
+
+func sortPeers(peers []Peer) {
+	sort.Slice(peers, func(i, j int) bool {
+		if peers[i].Name == peers[j].Name {
+			return peers[i].IP < peers[j].IP
+		}
+		return peers[i].Name < peers[j].Name
+	})
 }
 
 func offerKey(ip string, fileID uint64) string {

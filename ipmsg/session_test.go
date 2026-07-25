@@ -87,6 +87,37 @@ func TestSessionFileAndDirectoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSearchPeersFiltersAndExpires(t *testing.T) {
+	now := time.Now()
+	session := &Session{peers: map[string]Peer{
+		"192.168.1.2": {IP: "192.168.1.2", Name: "Alice", Host: "alice-mac", LastSeen: now},
+		"192.168.1.3": {IP: "192.168.1.3", Name: "Bob", Host: "bob-pc", LastSeen: now.Add(-4 * time.Minute)},
+	}}
+	peers := session.SearchPeers("alice")
+	if len(peers) != 1 || peers[0].IP != "192.168.1.2" {
+		t.Fatalf("unexpected peers: %#v", peers)
+	}
+	if peers := session.SearchPeers("bob"); len(peers) != 0 {
+		t.Fatalf("expired peer returned: %#v", peers)
+	}
+}
+
+func TestBroadcastTargetsIncludesGlobalBroadcast(t *testing.T) {
+	targets := broadcastTargets(2425)
+	if len(targets) == 0 || targets[0].IP.String() != "255.255.255.255" || targets[0].Port != 2425 {
+		t.Fatalf("unexpected broadcast targets: %#v", targets)
+	}
+}
+
+func TestIsLocalIP(t *testing.T) {
+	if !isLocalIP(net.ParseIP("127.0.0.1")) {
+		t.Fatal("loopback should be recognized as local")
+	}
+	if isLocalIP(net.ParseIP("192.0.2.1")) {
+		t.Fatal("documentation-only address should not be local")
+	}
+}
+
 func startTestSession(t *testing.T, port int, output string) (*Session, <-chan ReceiveEvent, <-chan error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

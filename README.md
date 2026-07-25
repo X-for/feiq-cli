@@ -79,8 +79,25 @@ go install ./cmd/feiq-cli
 其他交互命令：
 
 ```text
+/search user
+/search user 张三
+/history 192.168.110.150
 /help
 exit
+```
+
+程序启动后会通过 IP Messenger 广播自动发现同一局域网中的在线用户，并每分钟刷新一次。`/search user` 会同时显示当前在线用户和聊天记录中的本地联系人；可以使用用户名、主机名或 IP 片段过滤。
+
+`/history <IP>` 显示与指定 IP 最近的 50 条文本、文件和目录收发记录。历史默认保存在：
+
+```text
+~/.feiq-cli/history.jsonl
+```
+
+可以在启动时修改历史文件位置：
+
+```bash
+./feiq-cli --history-file ./data/history.jsonl
 ```
 
 也支持 `quit`、`/exit` 和 `/quit` 退出。退出时程序会停止监听、取消未完成任务并恢复终端状态。
@@ -245,10 +262,11 @@ example-2.txt
 - 接收路径安全检查
 - 常驻交互命令行及输入行实时重绘
 - 交互模式中并发发送消息和附件
+- IP Messenger 局域网在线用户自动发现
+- 本地 JSONL 聊天历史与用户检索
 
 暂未支持：
 
-- 自动发现局域网好友和好友列表
 - 群聊及多目标群发
 - 一次发送多个附件
 - 加密、签名和密封消息

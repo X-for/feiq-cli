@@ -11,6 +11,9 @@ import (
 const (
 	DefaultPort = 2425
 
+	CmdBrEntry     = 0x00000001
+	CmdBrExit      = 0x00000002
+	CmdAnsEntry    = 0x00000003
 	CmdSendMsg     = 0x00000020
 	CmdRecvMsg     = 0x00000021
 	CmdGetFileData = 0x00000060
