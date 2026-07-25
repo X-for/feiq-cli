@@ -10,13 +10,13 @@
 
 ```bash
 go test ./...
-go build -o feiq ./cmd/feiq
+go build -o feiq-cli ./cmd/feiq-cli
 ```
 
 ## 发送消息
 
 ```bash
-./feiq send-message --to 192.168.110.150 --text "来自命令行的消息"
+./feiq-cli send-message --to 192.168.110.150 --text "来自命令行的消息"
 ```
 
 命令会等待 `IPMSG_RECVMSG` 回执，并分别报告“收到回执”或“仅完成 UDP
@@ -25,7 +25,7 @@ go build -o feiq ./cmd/feiq
 ## 发送文件
 
 ```bash
-./feiq send-file --to 192.168.110.150 --path ./example.txt
+./feiq-cli send-file --to 192.168.110.150 --path ./example.txt
 ```
 
 进程必须持续运行，直到对方接受文件并通过 TCP 回连下载。默认最多等待 5
@@ -34,7 +34,7 @@ go build -o feiq ./cmd/feiq
 ## 发送目录
 
 ```bash
-./feiq send-dir --to 192.168.110.150 --path ./example-directory
+./feiq-cli send-dir --to 192.168.110.150 --path ./example-directory
 ```
 
 目录按 IP Messenger 的 `IPMSG_GETDIRFILES` 数据流发送，使用
@@ -43,7 +43,7 @@ go build -o feiq ./cmd/feiq
 ## 接收消息、文件和目录
 
 ```bash
-./feiq receive --output ./downloads
+./feiq-cli receive --output ./downloads
 ```
 
 接收服务会监听 UDP 2425。收到普通消息会输出到终端；收到文件或目录附件后，

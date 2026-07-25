@@ -158,13 +158,13 @@ func receive(args []string) error {
 }
 
 func usage() {
-	fmt.Print(`feiq - standalone IP Messenger/FeiQ command line tool
+	fmt.Print(`feiq-cli - standalone IP Messenger/FeiQ command line tool
 
 Usage:
-  feiq send-message --to IP --text TEXT [options]
-  feiq send-file    --to IP --path FILE [options]
-  feiq send-dir     --to IP --path DIRECTORY [options]
-  feiq receive      [--output DIRECTORY] [options]
+  feiq-cli send-message --to IP --text TEXT [options]
+  feiq-cli send-file    --to IP --path FILE [options]
+  feiq-cli send-dir     --to IP --path DIRECTORY [options]
+  feiq-cli receive      [--output DIRECTORY] [options]
 
 All commands accept --bind, --port, --name, --host and --version.
 File and directory offers must keep running until the receiver accepts them.
