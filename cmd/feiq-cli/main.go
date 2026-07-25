@@ -22,11 +22,11 @@ type commonFlags struct {
 	version string
 }
 
-func (c *commonFlags) add(fs *flag.FlagSet) {
+func (c *commonFlags) add(fs *flag.FlagSet) { // 公共标志
 	defaultHost, _ := os.Hostname()
 	fs.StringVar(&c.bind, "bind", "0.0.0.0", "local IPv4 address to bind")
 	fs.IntVar(&c.port, "port", ipmsg.DefaultPort, "IP Messenger UDP/TCP port")
-	fs.StringVar(&c.name, "name", "feiq-cli", "sender/display name")
+	fs.StringVar(&c.name, "name", defaultHost, "sender/display name")
 	fs.StringVar(&c.host, "host", defaultHost, "host name placed in packets")
 	fs.StringVar(&c.version, "version", "1", "IP Messenger version field")
 }
