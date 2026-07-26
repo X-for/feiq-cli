@@ -89,18 +89,14 @@ func writeDirectoryRecursive(w io.Writer, path, name string) error {
 
 func writeDirHeader(w io.Writer, record dirRecord) error {
 	name := strings.ReplaceAll(record.Name, ":", "::")
-	var header string
-	for {
-		// Nine hexadecimal digits matches the established iptux directory
-		// stream representation and remains valid for classic IPMsg peers.
-		body := fmt.Sprintf("%s:%09x:%x:", name, record.Size, record.Attr)
-		next := fmt.Sprintf("%x:%s", len(header), body)
-		if len(next) == len(header) {
-			header = next
-			break
-		}
-		header = next
+	// FeiQ-compatible IPMsg peers read an exact four-digit hexadecimal header
+	// length. The length includes the four digits and their trailing colon.
+	body := fmt.Sprintf("%s:%09x:%x:", name, record.Size, record.Attr)
+	length := 5 + len(body)
+	if length > 0xffff {
+		return fmt.Errorf("directory header is too large: %d bytes", length)
 	}
+	header := fmt.Sprintf("%04x:%s", length, body)
 	_, err := io.WriteString(w, header)
 	return err
 }
