@@ -328,15 +328,18 @@ func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort
 		}
 	}()
 	command := uint64(CmdGetFileData)
-	if attachment.Attr&0xff == FileDirectory {
-		command = CmdGetDirFiles
-	}
 	extra := []byte(fmt.Sprintf("%x:%x:0:", packetNo, attachment.FileID))
+	if attachment.Attr&0xff == FileDirectory {
+		// FeiQ-compatible peers use FILEATTACHOPT on directory data requests
+		// and expect the final offset field without an additional empty field.
+		command = CmdGetDirFiles | OptFileAttach
+		extra = []byte(fmt.Sprintf("%x:%x:0", packetNo, attachment.FileID))
+	}
 	request := EncodePacket(n.Identity, n.nextPacketNo(), command, extra)
 	if _, err := conn.Write(request); err != nil {
 		return "", err
 	}
-	if command == CmdGetDirFiles {
+	if CommandMode(command) == CmdGetDirFiles {
 		return receiveDirectoryStream(conn, outputDir)
 	}
 	name, err := safeName(attachment.Name)

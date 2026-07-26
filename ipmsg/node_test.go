@@ -1,7 +1,9 @@
 package ipmsg
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -114,6 +116,72 @@ func TestLocalDirectoryIntegration(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("%s: got %q, want %q", relative, got, want)
 		}
+	}
+}
+
+func TestDownloadDirectoryUsesFeiQCompatibleRequest(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	requests := make(chan Packet, 1)
+	serverErrors := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErrors <- err
+			return
+		}
+		defer conn.Close()
+		raw, err := bufio.NewReader(conn).ReadBytes(0)
+		if err != nil {
+			serverErrors <- err
+			return
+		}
+		request, err := DecodePacket(raw)
+		if err != nil {
+			serverErrors <- err
+			return
+		}
+		requests <- request
+		_, err = io.WriteString(conn, "0016:root:000000000:2:0013:.:000000000:3:")
+		serverErrors <- err
+	}()
+
+	node := testNode("127.0.0.1", testPort(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	saved, err := node.downloadAttachment(
+		ctx,
+		"127.0.0.1",
+		listener.Addr().(*net.TCPAddr).Port,
+		0x2a,
+		Attachment{FileID: 0xb, Name: "root", Attr: FileDirectory},
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(saved); err != nil {
+		t.Fatal(err)
+	} else if !info.IsDir() {
+		t.Fatalf("saved path %q is not a directory", saved)
+	}
+
+	request := <-requests
+	if CommandMode(request.Command) != CmdGetDirFiles {
+		t.Fatalf("command mode = %#x, want GETDIRFILES", request.Command)
+	}
+	if request.Command&OptFileAttach == 0 {
+		t.Fatalf("command %#x does not include FILEATTACHOPT", request.Command)
+	}
+	if got, want := string(request.Extra), "2a:b:0"; got != want {
+		t.Fatalf("request extra = %q, want %q", got, want)
+	}
+	if err := <-serverErrors; err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -64,3 +64,13 @@ func TestDirectoryStreamRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestDirectoryHeaderUsesFourHexDigitLength(t *testing.T) {
+	var stream bytes.Buffer
+	if err := writeDirHeader(&stream, dirRecord{Name: "root", Attr: FileDirectory}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stream.String(), "0016:root:000000000:2:"; got != want {
+		t.Fatalf("directory header = %q, want %q", got, want)
+	}
+}
