@@ -160,7 +160,9 @@ func receive(args []string) error {
 		}
 		fmt.Println()
 		for _, path := range event.SavedPaths {
-			fmt.Println("saved:", path)
+			if path != "" {
+				fmt.Println("saved:", path)
+			}
 		}
 	})
 }

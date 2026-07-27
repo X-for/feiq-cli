@@ -5,19 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 const (
 	DefaultPort = 2425
 
-	CmdBrEntry     = 0x00000001
-	CmdBrExit      = 0x00000002
-	CmdAnsEntry    = 0x00000003
-	CmdSendMsg     = 0x00000020
-	CmdRecvMsg     = 0x00000021
-	CmdGetFileData = 0x00000060
-	CmdGetDirFiles = 0x00000062
+	CmdBrEntry      = 0x00000001
+	CmdBrExit       = 0x00000002
+	CmdAnsEntry     = 0x00000003
+	CmdSendMsg      = 0x00000020
+	CmdRecvMsg      = 0x00000021
+	CmdGetFileData  = 0x00000060
+	CmdReleaseFiles = 0x00000061
+	CmdGetDirFiles  = 0x00000062
 
 	OptSendCheck  = 0x00000100
 	OptFileAttach = 0x00200000
@@ -90,8 +90,12 @@ func CommandMode(command uint64) uint64 {
 }
 
 func EncodeAttachment(a Attachment) []byte {
-	name := strings.ReplaceAll(a.Name, ":", "::")
-	return []byte(fmt.Sprintf("%x:%s:%x:%x:%x:\a", a.FileID, name, a.Size, a.ModTime, a.Attr))
+	name := bytes.ReplaceAll(encodeText(a.Name), []byte{':'}, []byte("::"))
+	var encoded bytes.Buffer
+	fmt.Fprintf(&encoded, "%x:", a.FileID)
+	encoded.Write(name)
+	fmt.Fprintf(&encoded, ":%x:%x:%x:\a", a.Size, a.ModTime, a.Attr)
+	return encoded.Bytes()
 }
 
 func DecodeAttachments(extra []byte) ([]Attachment, error) {

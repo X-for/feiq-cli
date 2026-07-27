@@ -2,6 +2,7 @@ package ipmsg
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -88,20 +89,18 @@ func writeDirectoryRecursive(w io.Writer, path, name string) error {
 }
 
 func writeDirHeader(w io.Writer, record dirRecord) error {
-	name := strings.ReplaceAll(record.Name, ":", "::")
-	var header string
-	for {
-		// Nine hexadecimal digits matches the established iptux directory
-		// stream representation and remains valid for classic IPMsg peers.
-		body := fmt.Sprintf("%s:%09x:%x:", name, record.Size, record.Attr)
-		next := fmt.Sprintf("%x:%s", len(header), body)
-		if len(next) == len(header) {
-			header = next
-			break
-		}
-		header = next
+	name := bytes.ReplaceAll(encodeText(record.Name), []byte{':'}, []byte("::"))
+	var body bytes.Buffer
+	body.Write(name)
+	fmt.Fprintf(&body, ":%09x:%x:", record.Size, record.Attr)
+	length := 5 + body.Len()
+	if length > 0xffff {
+		return fmt.Errorf("directory header is too large: %d bytes", length)
 	}
-	_, err := io.WriteString(w, header)
+	if _, err := fmt.Fprintf(w, "%04x:", length); err != nil {
+		return err
+	}
+	_, err := w.Write(body.Bytes())
 	return err
 }
 
@@ -181,11 +180,24 @@ func readDirHeader(r *bufio.Reader) (dirRecord, error) {
 	if err != nil {
 		return dirRecord{}, err
 	}
-	length, err := strconv.ParseInt(strings.TrimSuffix(lengthField, ":"), 16, 64)
+	lengthText := strings.TrimSuffix(lengthField, ":")
+	lengthFieldSize := int64(len(lengthField))
+	length, err := strconv.ParseInt(lengthText, 16, 64)
 	if err != nil {
-		return dirRecord{}, fmt.Errorf("invalid directory header length: %w", err)
+		// FeiQ for Windows can prepend a fixed binary compatibility block to
+		// the first directory header. Its actual header still ends with the
+		// standard four hexadecimal length digits and ':' delimiter.
+		if len(lengthText) < 4 {
+			return dirRecord{}, fmt.Errorf("invalid directory header length: %w", err)
+		}
+		lengthText = lengthText[len(lengthText)-4:]
+		length, err = strconv.ParseInt(lengthText, 16, 64)
+		if err != nil {
+			return dirRecord{}, fmt.Errorf("invalid directory header length: %w", err)
+		}
+		lengthFieldSize = 5
 	}
-	remaining := length - int64(len(lengthField))
+	remaining := length - lengthFieldSize
 	if remaining < 0 || remaining > 1024*1024 {
 		return dirRecord{}, fmt.Errorf("invalid directory header size %d", length)
 	}

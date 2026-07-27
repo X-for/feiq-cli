@@ -312,6 +312,48 @@ func (n *Node) Receive(ctx context.Context, outputDir string, onEvent func(Recei
 }
 
 func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort int, packetNo uint64, attachment Attachment, outputDir string) (string, error) {
+	const (
+		attachmentReadyDelay = 150 * time.Millisecond
+		attachmentAttempts   = 3
+		attachmentRetryDelay = 200 * time.Millisecond
+	)
+	if err := waitContext(ctx, attachmentReadyDelay); err != nil {
+		return "", err
+	}
+	ports := []int{senderPort}
+	if senderPort != n.Port {
+		ports = append(ports, n.Port)
+	}
+	var lastErr error
+	for _, port := range ports {
+		for attempt := 1; attempt <= attachmentAttempts; attempt++ {
+			path, err := n.downloadAttachmentAttempt(ctx, sender, port, packetNo, attachment, outputDir)
+			if err == nil {
+				return path, nil
+			}
+			if !errors.Is(err, errEmptyTransfer) {
+				return "", fmt.Errorf(
+					"download request to %s:%d (packet=%x file=%x): %w",
+					sender, port, packetNo, attachment.FileID, err,
+				)
+			}
+			lastErr = err
+			if attempt < attachmentAttempts {
+				if err := waitContext(ctx, attachmentRetryDelay); err != nil {
+					return "", err
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf(
+		"attachment sender %s ports %v closed without data (packet=%x file=%x) after %d attempts each: %w",
+		sender, ports, packetNo, attachment.FileID, attachmentAttempts, lastErr,
+	)
+}
+
+var errEmptyTransfer = errors.New("attachment sender closed without data")
+
+func (n *Node) downloadAttachmentAttempt(ctx context.Context, sender string, senderPort int, packetNo uint64, attachment Attachment, outputDir string) (string, error) {
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort(sender, strconv.Itoa(senderPort)))
 	if err != nil {
@@ -331,13 +373,20 @@ func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort
 	if attachment.Attr&0xff == FileDirectory {
 		command = CmdGetDirFiles
 	}
-	extra := []byte(fmt.Sprintf("%x:%x:0:", packetNo, attachment.FileID))
+	extra := []byte(fmt.Sprintf("%x:%x:0", packetNo, attachment.FileID))
 	request := EncodePacket(n.Identity, n.nextPacketNo(), command, extra)
 	if _, err := conn.Write(request); err != nil {
 		return "", err
 	}
-	if command == CmdGetDirFiles {
-		return receiveDirectoryStream(conn, outputDir)
+	reader := bufio.NewReader(conn)
+	if _, err := reader.Peek(1); err != nil {
+		if errors.Is(err, io.EOF) {
+			return "", errEmptyTransfer
+		}
+		return "", err
+	}
+	if CommandMode(command) == CmdGetDirFiles {
+		return receiveDirectoryStream(reader, outputDir)
 	}
 	name, err := safeName(attachment.Name)
 	if err != nil {
@@ -351,15 +400,28 @@ func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort
 	if err != nil {
 		return "", err
 	}
-	_, copyErr := io.CopyN(file, conn, attachment.Size)
+	_, copyErr := io.CopyN(file, reader, attachment.Size)
 	closeErr := file.Close()
 	if copyErr != nil {
+		_ = os.Remove(path)
 		return "", copyErr
 	}
 	if closeErr != nil {
+		_ = os.Remove(path)
 		return "", closeErr
 	}
 	return filepath.Clean(path), nil
+}
+
+func waitContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func isTimeout(err error) bool {

@@ -1,7 +1,9 @@
 package ipmsg
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -114,6 +116,190 @@ func TestLocalDirectoryIntegration(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("%s: got %q, want %q", relative, got, want)
 		}
+	}
+}
+
+func TestDownloadAttachmentUsesThreeFieldRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		attachment Attachment
+		command    uint64
+		response   string
+	}{
+		{
+			name:       "regular file",
+			attachment: Attachment{FileID: 0xb, Name: "file.txt", Size: 4, Attr: FileRegular},
+			command:    CmdGetFileData,
+			response:   "data",
+		},
+		{
+			name:       "directory",
+			attachment: Attachment{FileID: 0xb, Name: "root", Attr: FileDirectory},
+			command:    CmdGetDirFiles,
+			response:   "0016:root:000000000:2:0013:.:000000000:3:",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+
+			requests := make(chan Packet, 1)
+			serverErrors := make(chan error, 1)
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					serverErrors <- err
+					return
+				}
+				defer conn.Close()
+				raw, err := bufio.NewReader(conn).ReadBytes(0)
+				if err != nil {
+					serverErrors <- err
+					return
+				}
+				request, err := DecodePacket(raw)
+				if err != nil {
+					serverErrors <- err
+					return
+				}
+				requests <- request
+				_, err = io.WriteString(conn, test.response)
+				serverErrors <- err
+			}()
+
+			node := testNode("127.0.0.1", testPort(t))
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := node.downloadAttachment(
+				ctx,
+				"127.0.0.1",
+				listener.Addr().(*net.TCPAddr).Port,
+				0x2a,
+				test.attachment,
+				t.TempDir(),
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			request := <-requests
+			if request.Command != test.command {
+				t.Fatalf("command = %#x, want %#x", request.Command, test.command)
+			}
+			if got, want := string(request.Extra), "2a:b:0"; got != want {
+				t.Fatalf("request extra = %q, want %q", got, want)
+			}
+			if err := <-serverErrors; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDownloadAttachmentRetriesEmptyTransfer(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan Packet, 2)
+	serverErrors := make(chan error, 1)
+	go func() {
+		for attempt := 0; attempt < 2; attempt++ {
+			conn, err := listener.Accept()
+			if err != nil {
+				serverErrors <- err
+				return
+			}
+			raw, readErr := bufio.NewReader(conn).ReadBytes(0)
+			if readErr != nil {
+				_ = conn.Close()
+				serverErrors <- readErr
+				return
+			}
+			request, decodeErr := DecodePacket(raw)
+			if decodeErr != nil {
+				_ = conn.Close()
+				serverErrors <- decodeErr
+				return
+			}
+			requests <- request
+			if attempt == 1 {
+				_, err = io.WriteString(conn, "data")
+			}
+			if closeErr := conn.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				serverErrors <- err
+				return
+			}
+		}
+		serverErrors <- nil
+	}()
+
+	output := t.TempDir()
+	node := testNode("127.0.0.1", testPort(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	saved, err := node.downloadAttachment(
+		ctx,
+		"127.0.0.1",
+		listener.Addr().(*net.TCPAddr).Port,
+		0x2a,
+		Attachment{FileID: 0xb, Name: "retry.txt", Size: 4, Attr: FileRegular},
+		output,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(saved); err != nil || string(data) != "data" {
+		t.Fatalf("received data = %q, err = %v", data, err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if err := <-serverErrors; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDownloadFileRemovesPartialOutput(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = bufio.NewReader(conn).ReadBytes(0)
+		_, _ = io.WriteString(conn, "short")
+	}()
+
+	output := t.TempDir()
+	node := testNode("127.0.0.1", testPort(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = node.downloadAttachment(
+		ctx,
+		"127.0.0.1",
+		listener.Addr().(*net.TCPAddr).Port,
+		0x2a,
+		Attachment{FileID: 0xb, Name: "partial.bin", Size: 10, Attr: FileRegular},
+		output,
+	)
+	if err == nil {
+		t.Fatal("expected a short download error")
+	}
+	if _, statErr := os.Stat(filepath.Join(output, "partial.bin")); !os.IsNotExist(statErr) {
+		t.Fatalf("partial file was not removed: %v", statErr)
 	}
 }
 

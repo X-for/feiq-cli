@@ -312,6 +312,7 @@ func (s *Session) handleIncoming(packet Packet, from *net.UDPAddr) {
 			return
 		}
 		event.Attachments = attachments
+		failed := false
 		for _, attachment := range attachments {
 			path, err := s.node.downloadAttachment(
 				s.ctx,
@@ -322,10 +323,32 @@ func (s *Session) handleIncoming(packet Packet, from *net.UDPAddr) {
 				s.outputDir,
 			)
 			if err != nil {
-				s.reportError(fmt.Errorf("receive %s from %s: %w", attachment.Name, from.IP, err))
+				failed = true
+				s.reportError(fmt.Errorf("receive %s from %s:%d: %w", attachment.Name, from.IP, from.Port, err))
+				// SavedPaths intentionally stays aligned with Attachments so a
+				// later successful download cannot be displayed under the
+				// name of an earlier failed attachment.
+				event.SavedPaths = append(event.SavedPaths, "")
 				continue
 			}
 			event.SavedPaths = append(event.SavedPaths, path)
+		}
+		if failed {
+			release := EncodePacket(
+				s.node.Identity,
+				s.node.nextPacketNo(),
+				CmdReleaseFiles,
+				[]byte(strconv.FormatUint(packet.PacketNo, 10)),
+			)
+			if _, err := s.udp.WriteToUDP(release, from); err != nil {
+				s.reportError(fmt.Errorf("release failed attachment offer from %s: %w", from.IP, err))
+			}
+			if from.Port != s.node.Port {
+				controlAddr := &net.UDPAddr{IP: from.IP, Port: s.node.Port}
+				if _, err := s.udp.WriteToUDP(release, controlAddr); err != nil {
+					s.reportError(fmt.Errorf("release failed attachment offer via %s: %w", controlAddr, err))
+				}
+			}
 		}
 	}
 	if s.onEvent != nil {

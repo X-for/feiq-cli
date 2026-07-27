@@ -356,7 +356,7 @@ func printReceiveEvent(terminal *console.Terminal, event ipmsg.ReceiveEvent) {
 		if attachment.Attr&0xff == ipmsg.FileDirectory {
 			label = "目录"
 		}
-		if index < len(event.SavedPaths) {
+		if index < len(event.SavedPaths) && event.SavedPaths[index] != "" {
 			terminal.PrintfColor(console.ColorMagenta, "[%s] [%s %s] 收到%s: %s -> %s", clock(), event.User, event.From, label, attachment.Name, event.SavedPaths[index])
 		} else {
 			terminal.PrintfColor(console.ColorYellow, "[%s] [%s %s] 收到%s通知: %s（下载未完成）", clock(), event.User, event.From, label, attachment.Name)
@@ -386,7 +386,7 @@ func recordReceiveEvent(store *history.Store, event ipmsg.ReceiveEvent, onError 
 			kind = "dir"
 		}
 		entry := history.Entry{Direction: "in", PeerIP: event.From, PeerName: event.User, Kind: kind, Content: attachment.Name}
-		if index < len(event.SavedPaths) {
+		if index < len(event.SavedPaths) && event.SavedPaths[index] != "" {
 			entry.SavedPath = event.SavedPaths[index]
 		}
 		if err := store.Append(entry); err != nil {
