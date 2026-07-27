@@ -1,0 +1,12 @@
+{
+  "bind": "0.0.0.0",
+  "port": 2425,
+  "name": "feiq-cli",
+  "host": "feiq-cli",
+  "version": "1",
+  "output": "~/Downloads/飞秋接收",
+  "history_file": "~/.feiq-cli/history.jsonl",
+  "color": "auto",
+  "message_wait": "5s",
+  "transfer_wait": "5m"
+}

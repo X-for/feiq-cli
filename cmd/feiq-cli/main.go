@@ -22,13 +22,13 @@ type commonFlags struct {
 	version string
 }
 
-func (c *commonFlags) add(fs *flag.FlagSet) { // 公共标志
+func (c *commonFlags) add(fs *flag.FlagSet, config appConfig) { // 公共标志
 	defaultHost, _ := os.Hostname()
-	fs.StringVar(&c.bind, "bind", "0.0.0.0", "local IPv4 address to bind")
-	fs.IntVar(&c.port, "port", ipmsg.DefaultPort, "IP Messenger UDP/TCP port")
-	fs.StringVar(&c.name, "name", defaultHost, "sender/display name")
-	fs.StringVar(&c.host, "host", defaultHost, "host name placed in packets")
-	fs.StringVar(&c.version, "version", "1", "IP Messenger version field")
+	fs.StringVar(&c.bind, "bind", configString(config.Bind, "0.0.0.0"), "local IPv4 address to bind")
+	fs.IntVar(&c.port, "port", configInt(config.Port, ipmsg.DefaultPort), "IP Messenger UDP/TCP port")
+	fs.StringVar(&c.name, "name", configString(config.Name, defaultHost), "sender/display name")
+	fs.StringVar(&c.host, "host", configString(config.Host, defaultHost), "host name placed in packets")
+	fs.StringVar(&c.version, "version", configString(config.Version, "1"), "IP Messenger version field")
 }
 
 func (c commonFlags) node() *ipmsg.Node {
@@ -73,12 +73,17 @@ func main() {
 }
 
 func sendMessage(args []string) error {
+	config, configPath, err := loadAppConfig(args)
+	if err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("send-message", flag.ContinueOnError)
 	var common commonFlags
-	common.add(fs)
+	common.add(fs, config)
+	addConfigFlag(fs, configPath)
 	to := fs.String("to", "", "target IPv4 address (required)")
 	text := fs.String("text", "", "message text (required)")
-	wait := fs.Duration("wait", 3*time.Second, "time to wait for RECVMSG acknowledgement")
+	wait := fs.Duration("wait", configDuration(config.MessageWait, 3*time.Second), "time to wait for RECVMSG acknowledgement")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -104,12 +109,17 @@ func sendPath(args []string, wantDir bool) error {
 	if wantDir {
 		command = "send-dir"
 	}
+	config, configPath, err := loadAppConfig(args)
+	if err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	var common commonFlags
-	common.add(fs)
+	common.add(fs, config)
+	addConfigFlag(fs, configPath)
 	to := fs.String("to", "", "target IPv4 address (required)")
 	path := fs.String("path", "", "file or directory path (required)")
-	wait := fs.Duration("wait", 5*time.Minute, "maximum time to wait for the target to download")
+	wait := fs.Duration("wait", configDuration(config.TransferWait, 5*time.Minute), "maximum time to wait for the target to download")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -137,10 +147,15 @@ func sendPath(args []string, wantDir bool) error {
 }
 
 func receive(args []string) error {
+	config, configPath, err := loadAppConfig(args)
+	if err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("receive", flag.ContinueOnError)
 	var common commonFlags
-	common.add(fs)
-	output := fs.String("output", "./downloads", "directory for automatically received files/directories")
+	common.add(fs, config)
+	addConfigFlag(fs, configPath)
+	output := fs.String("output", configString(config.Output, "./downloads"), "directory for automatically received files/directories")
 	timeout := fs.Duration("timeout", 0, "optional receiver lifetime; 0 waits until Ctrl-C")
 	if err := fs.Parse(args); err != nil {
 		return err

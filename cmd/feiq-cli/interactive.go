@@ -40,14 +40,19 @@ var interactiveCommands = []string{
 }
 
 func interactive(args []string) error {
+	config, configPath, err := loadAppConfig(args)
+	if err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("interactive", flag.ContinueOnError)
 	var common commonFlags
-	common.add(fs)
-	output := fs.String("output", "./downloads", "directory for automatically received files/directories")
-	historyPath := fs.String("history-file", history.DefaultPath(), "local JSONL chat history file")
-	colorMode := fs.String("color", "auto", "terminal colors: auto, always or never")
-	messageWait := fs.Duration("message-wait", 5*time.Second, "time to wait for message acknowledgement")
-	transferWait := fs.Duration("transfer-wait", 5*time.Minute, "time to keep each attachment offer active")
+	common.add(fs, config)
+	addConfigFlag(fs, configPath)
+	output := fs.String("output", configString(config.Output, "./downloads"), "directory for automatically received files/directories")
+	historyPath := fs.String("history-file", configString(config.HistoryFile, history.DefaultPath()), "local JSONL chat history file")
+	colorMode := fs.String("color", configString(config.Color, "auto"), "terminal colors: auto, always or never")
+	messageWait := fs.Duration("message-wait", configDuration(config.MessageWait, 5*time.Second), "time to wait for message acknowledgement")
+	transferWait := fs.Duration("transfer-wait", configDuration(config.TransferWait, 5*time.Minute), "time to keep each attachment offer active")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

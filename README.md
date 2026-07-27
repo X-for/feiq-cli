@@ -59,6 +59,65 @@ go build -o feiq-cli ./cmd/feiq-cli
 go install ./cmd/feiq-cli
 ```
 
+## 配置文件
+
+程序默认读取：
+
+```text
+~/.feiq-cli/config.json
+```
+
+配置文件不存在时会继续使用内置默认值。可以从仓库中的示例开始：
+
+```bash
+mkdir -p ~/.feiq-cli
+cp config.example.json ~/.feiq-cli/config.json
+```
+
+例如将收到的文件保存到指定目录：
+
+```json
+{
+  "output": "~/Downloads/飞秋接收",
+  "history_file": "~/.feiq-cli/history.jsonl",
+  "name": "CLI 客户端",
+  "host": "feiq-cli",
+  "bind": "192.168.110.25",
+  "port": 2425,
+  "color": "auto",
+  "message_wait": "5s",
+  "transfer_wait": "30m"
+}
+```
+
+支持的字段：
+
+| 字段 | 用途 |
+| --- | --- |
+| `bind` | 本地 IPv4 监听地址 |
+| `port` | IP Messenger UDP/TCP 端口 |
+| `name` | 向对方显示的名称 |
+| `host` | 协议包中的主机名 |
+| `version` | IP Messenger 版本字段 |
+| `output` | 自动接收文件和目录的保存路径 |
+| `history_file` | 本地聊天记录路径 |
+| `color` | `auto`、`always` 或 `never` |
+| `message_wait` | 消息回执等待时间，例如 `5s` |
+| `transfer_wait` | 附件等待接收时间，例如 `30m` |
+
+所有命令均可使用其他配置文件：
+
+```bash
+./feiq-cli --config ./config.json
+./feiq-cli receive --config ./config.json
+```
+
+命令行参数的优先级高于配置文件，例如：
+
+```bash
+./feiq-cli --output /tmp/received
+```
+
 ## 快速开始
 
 直接启动程序会进入推荐的常驻交互模式：
@@ -253,6 +312,7 @@ example-2.txt
 所有子命令均支持：
 
 ```text
+--config PATH      JSON 配置文件
 --bind 0.0.0.0    本地 IPv4 监听地址
 --port 2425       IP Messenger UDP/TCP 端口
 --name feiq-cli   向对方显示的名称
@@ -323,4 +383,3 @@ go vet ./...
 - 你可以使用、复制、修改和分发本项目代码。
 - 如果你分发了修改版或基于本项目的衍生作品，通常需要继续以 GPL 兼容方式公开对应源码。
 - 协议完整条款以仓库根目录的 [`LICENSE`](./LICENSE) 为准。
-
