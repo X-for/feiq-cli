@@ -61,29 +61,38 @@ go install ./cmd/feiq-cli
 
 ## 配置文件
 
-程序默认读取：
+程序启动时默认尝试读取：
 
 ```text
 ~/.feiq-cli/config.json
 ```
 
-配置文件不存在时会继续使用内置默认值。可以从仓库中的示例开始：
+默认配置文件不存在时不会报错，也不会自动创建，程序会继续使用内置默认值。仓库根目录的 `config.example.json` 只是模板，不会被自动加载。可以复制模板后再修改：
 
 ```bash
 mkdir -p ~/.feiq-cli
 cp config.example.json ~/.feiq-cli/config.json
 ```
 
-例如将收到的文件保存到指定目录：
+配置文件可以只填写需要修改的字段。例如只修改接收文件的保存目录：
 
 ```json
 {
+  "output": "~/Downloads/飞秋接收"
+}
+```
+
+完整配置示例：
+
+```json
+{
+  "bind": "192.168.110.25",
+  "port": 2425,
   "output": "~/Downloads/飞秋接收",
   "history_file": "~/.feiq-cli/history.jsonl",
   "name": "CLI 客户端",
   "host": "feiq-cli",
-  "bind": "192.168.110.25",
-  "port": 2425,
+  "version": "1",
   "color": "auto",
   "message_wait": "5s",
   "transfer_wait": "30m"
@@ -92,30 +101,52 @@ cp config.example.json ~/.feiq-cli/config.json
 
 支持的字段：
 
-| 字段 | 用途 |
-| --- | --- |
-| `bind` | 本地 IPv4 监听地址 |
-| `port` | IP Messenger UDP/TCP 端口 |
-| `name` | 向对方显示的名称 |
-| `host` | 协议包中的主机名 |
-| `version` | IP Messenger 版本字段 |
-| `output` | 自动接收文件和目录的保存路径 |
-| `history_file` | 本地聊天记录路径 |
-| `color` | `auto`、`always` 或 `never` |
-| `message_wait` | 消息回执等待时间，例如 `5s` |
-| `transfer_wait` | 附件等待接收时间，例如 `30m` |
+| 字段 | 内置默认值 | 适用范围 |
+| --- | --- | --- |
+| `bind` | `0.0.0.0` | 所有运行模式的本地 IPv4 监听地址 |
+| `port` | `2425` | 所有运行模式的 IP Messenger UDP/TCP 端口，范围 `1`–`65535` |
+| `name` | 当前系统主机名 | 所有运行模式中向对方显示的名称 |
+| `host` | 当前系统主机名 | 所有运行模式中写入协议包的主机名 |
+| `version` | `1` | 所有运行模式的 IP Messenger 版本字段 |
+| `output` | `./downloads` | 交互模式和 `receive` 自动接收文件、目录的保存路径 |
+| `history_file` | `~/.feiq-cli/history.jsonl` | 交互模式的本地聊天记录路径 |
+| `color` | `auto` | 交互模式颜色，可设为 `auto`、`always` 或 `never` |
+| `message_wait` | 交互模式 `5s`；`send-message` 为 `3s` | 消息回执等待时间 |
+| `transfer_wait` | `5m` | 交互模式、`send-file` 和 `send-dir` 的附件等待接收时间 |
+
+`message_wait` 和 `transfer_wait` 使用 Go 时间格式且必须大于零，例如 `500ms`、`5s`、`30m` 或 `1h`。
+
+配置中的 `output`、`history_file` 以及 `--config` 路径支持以 `~/` 开头。其他相对路径以启动程序时的当前工作目录为基准。
 
 所有命令均可使用其他配置文件：
 
 ```bash
 ./feiq-cli --config ./config.json
 ./feiq-cli receive --config ./config.json
+./feiq-cli send-message --config ./config.json --to 192.168.110.150 --text "测试"
 ```
 
-命令行参数的优先级高于配置文件，例如：
+显式指定的配置文件不存在时，程序会报错退出。配置采用严格 JSON 格式，不支持注释、尾随逗号或未定义字段；字段拼写错误也会直接报告。
+
+命令行参数的优先级高于配置文件。例如配置中设置了 `output`，仍可在本次运行中临时覆盖：
 
 ```bash
 ./feiq-cli --output /tmp/received
+```
+
+配置字段与命令行参数的对应关系：
+
+```text
+bind           --bind
+port           --port
+name           --name
+host           --host
+version        --version
+output         --output
+history_file   --history-file
+color          --color
+message_wait   --message-wait（交互模式）或 --wait（send-message）
+transfer_wait  --transfer-wait（交互模式）或 --wait（send-file/send-dir）
 ```
 
 ## 快速开始
