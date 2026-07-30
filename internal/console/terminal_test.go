@@ -1,7 +1,9 @@
 package console
 
 import (
+	"bytes"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -23,25 +25,31 @@ func TestCommonPrefix(t *testing.T) {
 
 func TestMatchingCommands(t *testing.T) {
 	terminal := &Terminal{commands: []string{"/send msg ", "/send file ", "/history "}}
-	matches := terminal.matchingCommandsLocked("/send f")
-	if len(matches) != 1 || matches[0] != "/send file " {
+	matches := terminal.matchingCompletionsLocked("/send f")
+	if len(matches) != 1 || matches[0].Value != "/send file " {
 		t.Fatalf("unexpected matches: %#v", matches)
 	}
 }
 
-func TestTargetSelectionAndCursor(t *testing.T) {
-	terminal := &Terminal{out: io.Discard, targets: []string{"192.168.1.2", "192.168.1.3"}, targetAt: -1}
-	terminal.selectTargetLocked(1)
-	if got := string(terminal.line); got != "/send msg 192.168.1.2 " || terminal.cursor != len(terminal.line) {
-		t.Fatalf("unexpected selected target: %q cursor=%d", got, terminal.cursor)
+func TestHistorySelectionRestoresExactLinesAndDraft(t *testing.T) {
+	terminal := &Terminal{out: io.Discard}
+	terminal.rememberLineLocked("/file \"/tmp/a file\"")
+	terminal.rememberLineLocked("消息 \\\\ \"原样\"")
+	terminal.historyAt = len(terminal.history)
+	terminal.line = []rune("draft")
+
+	terminal.selectHistoryLocked(-1)
+	if got := string(terminal.line); got != "消息 \\\\ \"原样\"" || terminal.cursor != len(terminal.line) {
+		t.Fatalf("unexpected latest history: %q cursor=%d", got, terminal.cursor)
 	}
-	terminal.selectTargetLocked(1)
-	if got := string(terminal.line); got != "/send msg 192.168.1.3 " {
-		t.Fatalf("unexpected older target: %q", got)
+	terminal.selectHistoryLocked(-1)
+	if got := string(terminal.line); got != "/file \"/tmp/a file\"" {
+		t.Fatalf("unexpected older history: %q", got)
 	}
-	terminal.selectTargetLocked(-1)
-	if got := string(terminal.line); got != "/send msg 192.168.1.2 " {
-		t.Fatalf("unexpected newer target: %q", got)
+	terminal.selectHistoryLocked(1)
+	terminal.selectHistoryLocked(1)
+	if got := string(terminal.line); got != "draft" {
+		t.Fatalf("draft was not restored: %q", got)
 	}
 }
 
@@ -51,9 +59,40 @@ func TestDisplayWidth(t *testing.T) {
 	}
 }
 
-func TestUniqueTargets(t *testing.T) {
-	got := uniqueTargets([]string{" 1.2.3.4 ", "5.6.7.8", "1.2.3.4"})
-	if len(got) != 2 || got[0] != "1.2.3.4" || got[1] != "5.6.7.8" {
-		t.Fatalf("unexpected targets: %#v", got)
+func TestCompletionHintStaysOnCurrentRow(t *testing.T) {
+	var output bytes.Buffer
+	terminal := &Terminal{
+		out:      &output,
+		prompt:   "feiq> ",
+		line:     []rune("/"),
+		commands: []string{"/to ", "/file ", "/help"},
+	}
+	terminal.redrawLocked(true)
+	if strings.Contains(output.String(), "\n") || strings.Contains(output.String(), "\r\n") {
+		t.Fatalf("completion hint added a new row: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "/to") {
+		t.Fatalf("completion hint missing candidates: %q", output.String())
+	}
+}
+
+func TestStructuredCompletion(t *testing.T) {
+	terminal := &Terminal{
+		out: io.Discard,
+		completer: func(string) []Completion {
+			return []Completion{{Value: "/to 192.168.1.2", Display: "Alice (192.168.1.2)"}}
+		},
+		line: []rune("/to ali"),
+	}
+	terminal.completeLocked()
+	if got := string(terminal.line); got != "/to 192.168.1.2" {
+		t.Fatalf("unexpected completion: %q", got)
+	}
+}
+
+func TestTruncateWidth(t *testing.T) {
+	got := truncateWidth("abcdef中文", 6)
+	if displayWidth([]rune(got)) > 6 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("unexpected truncation: %q", got)
 	}
 }

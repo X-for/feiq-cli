@@ -28,9 +28,16 @@ const (
 	ColorGray    Color = "90"
 )
 
-// Terminal provides a small interactive line editor. Printf can be called by
-// background goroutines: it clears the active input row, writes the event,
-// then redraws the prompt and unfinished input.
+type Completion struct {
+	Value   string
+	Display string
+}
+
+type Completer func(line string) []Completion
+
+// Terminal is a small Unicode-aware line editor. Async output clears and
+// redraws the active input row. Completion hints share that row so repeated
+// input never appends hint lines to the scrollback.
 type Terminal struct {
 	in          *os.File
 	out         io.Writer
@@ -45,10 +52,41 @@ type Terminal struct {
 	reading   bool
 	closed    bool
 	commands  []string
-	completer func(string) []string
+	completer Completer
 	colors    bool
-	targets   []string
-	targetAt  int
+
+	history   []string
+	historyAt int
+	draft     []rune
+}
+
+func New(in *os.File, out io.Writer, prompt string) (*Terminal, error) {
+	t := &Terminal{
+		in:     in,
+		out:    out,
+		prompt: prompt,
+		reader: bufio.NewReader(in),
+	}
+	fd := int(in.Fd())
+	if term.IsTerminal(fd) {
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return nil, err
+		}
+		t.interactive = true
+		t.colors = os.Getenv("NO_COLOR") == ""
+		t.oldState = oldState
+	}
+	return t, nil
+}
+
+func (t *Terminal) SetPrompt(prompt string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prompt = prompt
+	if t.reading {
+		t.redrawLocked(true)
+	}
 }
 
 func (t *Terminal) SetCommands(commands []string) {
@@ -57,7 +95,7 @@ func (t *Terminal) SetCommands(commands []string) {
 	t.commands = append([]string(nil), commands...)
 }
 
-func (t *Terminal) SetCompleter(completer func(string) []string) {
+func (t *Terminal) SetCompleter(completer Completer) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.completer = completer
@@ -77,41 +115,6 @@ func (t *Terminal) SetColorMode(mode string) error {
 		return fmt.Errorf("color must be auto, always or never")
 	}
 	return nil
-}
-
-func (t *Terminal) SetTargets(targets []string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.targets = uniqueTargets(targets)
-	t.targetAt = -1
-}
-
-func (t *Terminal) RememberTarget(target string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.targets = uniqueTargets(append([]string{target}, t.targets...))
-	t.targetAt = -1
-}
-
-func New(in *os.File, out io.Writer, prompt string) (*Terminal, error) {
-	t := &Terminal{
-		in:       in,
-		out:      out,
-		prompt:   prompt,
-		reader:   bufio.NewReader(in),
-		targetAt: -1,
-	}
-	fd := int(in.Fd())
-	if term.IsTerminal(fd) {
-		oldState, err := term.MakeRaw(fd)
-		if err != nil {
-			return nil, err
-		}
-		t.interactive = true
-		t.colors = os.Getenv("NO_COLOR") == ""
-		t.oldState = oldState
-	}
-	return t, nil
 }
 
 func (t *Terminal) Close() error {
@@ -142,7 +145,9 @@ func (t *Terminal) ReadLine() (string, error) {
 	t.reading = true
 	t.line = t.line[:0]
 	t.cursor = 0
-	t.redrawLocked()
+	t.historyAt = len(t.history)
+	t.draft = t.draft[:0]
+	t.redrawLocked(true)
 	t.mu.Unlock()
 
 	var encoded []byte
@@ -152,9 +157,8 @@ func (t *Terminal) ReadLine() (string, error) {
 			t.finishRead()
 			return "", err
 		}
-		ch := one[0]
-		switch ch {
-		case 3: // Ctrl-C in raw mode.
+		switch ch := one[0]; ch {
+		case 3: // Ctrl-C.
 			t.finishRead()
 			return "", ErrInterrupt
 		case 4: // Ctrl-D.
@@ -168,31 +172,34 @@ func (t *Terminal) ReadLine() (string, error) {
 		case '\r', '\n':
 			t.mu.Lock()
 			line := string(t.line)
+			t.rememberLineLocked(line)
+			t.redrawLocked(false)
 			t.line = t.line[:0]
+			t.cursor = 0
 			t.reading = false
 			_, _ = io.WriteString(t.out, "\r\n")
 			t.mu.Unlock()
 			return line, nil
 		case 8, 127:
 			t.mu.Lock()
-			t.targetAt = -1
+			t.detachHistoryLocked()
 			if t.cursor > 0 {
 				copy(t.line[t.cursor-1:], t.line[t.cursor:])
 				t.line = t.line[:len(t.line)-1]
 				t.cursor--
-				t.redrawLocked()
 			}
+			t.redrawLocked(true)
 			t.mu.Unlock()
-		case 9: // Tab completes the current command prefix.
+		case 9: // Tab.
 			t.mu.Lock()
 			t.completeLocked()
 			t.mu.Unlock()
-		case 21: // Ctrl-U clears the current input.
+		case 21: // Ctrl-U.
 			t.mu.Lock()
+			t.detachHistoryLocked()
 			t.line = t.line[:0]
 			t.cursor = 0
-			t.targetAt = -1
-			t.redrawLocked()
+			t.redrawLocked(true)
 			t.mu.Unlock()
 		case 27:
 			var sequence [2]byte
@@ -200,19 +207,19 @@ func (t *Terminal) ReadLine() (string, error) {
 				t.mu.Lock()
 				switch sequence[1] {
 				case 'A':
-					t.selectTargetLocked(1)
+					t.selectHistoryLocked(-1)
 				case 'B':
-					t.selectTargetLocked(-1)
+					t.selectHistoryLocked(1)
 				case 'C':
 					if t.cursor < len(t.line) {
 						t.cursor++
 					}
-					t.redrawLocked()
+					t.redrawLocked(true)
 				case 'D':
 					if t.cursor > 0 {
 						t.cursor--
 					}
-					t.redrawLocked()
+					t.redrawLocked(true)
 				}
 				t.mu.Unlock()
 			}
@@ -228,16 +235,12 @@ func (t *Terminal) ReadLine() (string, error) {
 			}
 			encoded = encoded[size:]
 			t.mu.Lock()
-			t.targetAt = -1
+			t.detachHistoryLocked()
 			t.line = append(t.line, 0)
 			copy(t.line[t.cursor+1:], t.line[t.cursor:])
 			t.line[t.cursor] = r
 			t.cursor++
-			if string(t.line) == "/" {
-				t.showCompletionsLocked(t.matchingCommandsLocked("/"))
-			} else {
-				t.redrawLocked()
-			}
+			t.redrawLocked(true)
 			t.mu.Unlock()
 		}
 	}
@@ -253,7 +256,7 @@ func (t *Terminal) Printf(format string, args ...any) {
 		_, _ = io.WriteString(t.out, message)
 		_, _ = io.WriteString(t.out, "\r\n")
 		if t.reading {
-			t.redrawLocked()
+			t.redrawLocked(true)
 		}
 		return
 	}
@@ -277,14 +280,28 @@ func (t *Terminal) finishRead() {
 	t.reading = false
 	t.line = t.line[:0]
 	t.cursor = 0
-	_, _ = io.WriteString(t.out, "\r\n")
+	_, _ = io.WriteString(t.out, "\r\x1b[2K\r\n")
 }
 
-func (t *Terminal) redrawLocked() {
+func (t *Terminal) redrawLocked(showHint bool) {
 	_, _ = io.WriteString(t.out, "\r\x1b[2K")
 	_, _ = io.WriteString(t.out, t.prompt)
 	_, _ = io.WriteString(t.out, string(t.line))
-	if columns := displayWidth(t.line[t.cursor:]); columns > 0 {
+
+	hint := ""
+	if showHint {
+		hint = t.completionHintLocked()
+	}
+	if hint != "" {
+		if t.colors {
+			_, _ = io.WriteString(t.out, "\x1b["+string(ColorGray)+"m"+hint+"\x1b[0m")
+		} else {
+			_, _ = io.WriteString(t.out, hint)
+		}
+	}
+
+	columns := displayWidth(t.line[t.cursor:]) + displayWidth([]rune(hint))
+	if columns > 0 {
 		_, _ = fmt.Fprintf(t.out, "\x1b[%dD", columns)
 	}
 }
@@ -293,62 +310,119 @@ func (t *Terminal) completeLocked() {
 	prefix := string(t.line)
 	matches := t.matchingCompletionsLocked(prefix)
 	if len(matches) == 0 {
-		t.redrawLocked()
+		t.redrawLocked(true)
 		return
 	}
-	completion := commonPrefix(matches)
+
+	values := make([]string, 0, len(matches))
+	for _, match := range matches {
+		values = append(values, match.Value)
+	}
+	completion := commonPrefix(values)
 	if len(matches) == 1 {
-		t.line = []rune(matches[0])
-		t.cursor = len(t.line)
-		t.redrawLocked()
-		return
+		completion = matches[0].Value
 	}
 	if len(completion) > len(prefix) {
+		t.detachHistoryLocked()
 		t.line = []rune(completion)
 		t.cursor = len(t.line)
 	}
-	t.showCompletionsLocked(matches)
+	t.redrawLocked(true)
 }
 
-func (t *Terminal) matchingCompletionsLocked(prefix string) []string {
+func (t *Terminal) matchingCompletionsLocked(prefix string) []Completion {
 	if t.completer != nil {
 		return t.completer(prefix)
 	}
-	return t.matchingCommandsLocked(prefix)
+	var matches []Completion
+	for _, command := range t.commands {
+		if strings.HasPrefix(command, prefix) {
+			matches = append(matches, Completion{
+				Value:   command,
+				Display: strings.TrimSpace(command),
+			})
+		}
+	}
+	return matches
 }
 
-func (t *Terminal) selectTargetLocked(direction int) {
-	if len(t.targets) == 0 {
-		t.redrawLocked()
+func (t *Terminal) completionHintLocked() string {
+	matches := t.matchingCompletionsLocked(string(t.line))
+	if len(matches) == 0 {
+		return ""
+	}
+	displays := make([]string, 0, len(matches))
+	for _, match := range matches {
+		display := match.Display
+		if display == "" {
+			display = strings.TrimSpace(match.Value)
+		}
+		displays = append(displays, display)
+	}
+	hint := "  [" + strings.Join(displays, " | ") + "]"
+	return t.fitHintLocked(hint)
+}
+
+func (t *Terminal) fitHintLocked(hint string) string {
+	width := 120
+	if t.interactive {
+		if columns, _, err := term.GetSize(int(t.in.Fd())); err == nil && columns > 0 {
+			width = columns
+		}
+	}
+	available := width - displayWidth([]rune(t.prompt)) - displayWidth(t.line) - 1
+	if available < 8 {
+		return ""
+	}
+	if displayWidth([]rune(hint)) <= available {
+		return hint
+	}
+	return truncateWidth(hint, available)
+}
+
+func (t *Terminal) rememberLineLocked(line string) {
+	if strings.TrimSpace(line) == "" {
 		return
 	}
-	if direction > 0 {
-		if t.targetAt < len(t.targets)-1 {
-			t.targetAt++
+	if len(t.history) == 0 || t.history[len(t.history)-1] != line {
+		t.history = append(t.history, line)
+		if len(t.history) > 200 {
+			t.history = append([]string(nil), t.history[len(t.history)-200:]...)
 		}
-	} else if t.targetAt >= 0 {
-		t.targetAt--
 	}
-	if t.targetAt < 0 {
-		t.line = t.line[:0]
-	} else {
-		t.line = []rune("/send msg " + t.targets[t.targetAt] + " ")
-	}
-	t.cursor = len(t.line)
-	t.redrawLocked()
+	t.historyAt = len(t.history)
+	t.draft = t.draft[:0]
 }
 
-func uniqueTargets(targets []string) []string {
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(targets))
-	for _, target := range targets {
-		target = strings.TrimSpace(target)
-		if target != "" && !seen[target] {
-			seen[target] = true
-			result = append(result, target)
-		}
+func (t *Terminal) selectHistoryLocked(direction int) {
+	if len(t.history) == 0 {
+		t.redrawLocked(true)
+		return
 	}
-	return result
+	if t.historyAt == len(t.history) && direction < 0 {
+		t.draft = append(t.draft[:0], t.line...)
+	}
+	t.historyAt += direction
+	if t.historyAt < 0 {
+		t.historyAt = 0
+	}
+	if t.historyAt > len(t.history) {
+		t.historyAt = len(t.history)
+	}
+	if t.historyAt == len(t.history) {
+		t.line = append(t.line[:0], t.draft...)
+	} else {
+		t.line = []rune(t.history[t.historyAt])
+	}
+	t.cursor = len(t.line)
+	t.redrawLocked(true)
+}
+
+func (t *Terminal) detachHistoryLocked() {
+	if t.historyAt != len(t.history) {
+		t.historyAt = len(t.history)
+		t.draft = t.draft[:0]
+	}
 }
 
 func displayWidth(value []rune) int {
@@ -365,28 +439,22 @@ func displayWidth(value []rune) int {
 	return width
 }
 
-func (t *Terminal) matchingCommandsLocked(prefix string) []string {
-	var matches []string
-	for _, command := range t.commands {
-		if strings.HasPrefix(command, prefix) {
-			matches = append(matches, command)
+func truncateWidth(value string, maxWidth int) string {
+	if maxWidth <= 1 {
+		return ""
+	}
+	limit := maxWidth - 1
+	var result []rune
+	width := 0
+	for _, r := range []rune(value) {
+		runeWidth := displayWidth([]rune{r})
+		if width+runeWidth > limit {
+			break
 		}
+		result = append(result, r)
+		width += runeWidth
 	}
-	return matches
-}
-
-func (t *Terminal) showCompletionsLocked(commands []string) {
-	if len(commands) == 0 {
-		t.redrawLocked()
-		return
-	}
-	display := make([]string, len(commands))
-	for index, command := range commands {
-		display[index] = strings.TrimSpace(command)
-	}
-	_, _ = io.WriteString(t.out, "\r\x1b[2K")
-	_, _ = io.WriteString(t.out, "可用命令: "+strings.Join(display, "  ")+"\r\n")
-	t.redrawLocked()
+	return string(result) + "…"
 }
 
 func commonPrefix(values []string) string {

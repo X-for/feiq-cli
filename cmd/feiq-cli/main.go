@@ -57,6 +57,8 @@ func main() {
 		err = sendPath(os.Args[2:], true)
 	case "receive":
 		err = receive(os.Args[2:])
+	case "version":
+		printVersion(os.Stdout)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -191,6 +193,7 @@ Usage:
   feiq-cli send-file    --to IP --path FILE [options]
   feiq-cli send-dir     --to IP --path DIRECTORY [options]
   feiq-cli receive      [--output DIRECTORY] [options]
+  feiq-cli version
 
 All commands accept --bind, --port, --name, --host and --version.
 File and directory offers must keep running until the receiver accepts them.

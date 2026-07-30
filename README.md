@@ -51,6 +51,7 @@ go build -o feiq-cli ./cmd/feiq-cli
 
 ```bash
 ./feiq-cli help
+./feiq-cli version
 ```
 
 也可以将它安装到 Go 的二进制目录：
@@ -157,33 +158,49 @@ transfer_wait  --transfer-wait（交互模式）或 --wait（send-file/send-dir�
 ./feiq-cli
 ```
 
-启动后会同时监听 UDP/TCP 2425，在 `feiq>` 输入栏中发送消息、文件或目录，并在输入栏上方实时显示双方事件：
+启动后会同时监听 UDP/TCP 2425。先选择联系人，然后可以像聊天窗口一样直接输入消息：
 
 ```text
-/send msg  192.168.110.150 你好
-/send file 192.168.110.150 ./example.txt
-/send dir  192.168.110.150 ./example-directory
-/send image 192.168.110.150
+feiq> /to 郑安其
+当前联系人: 郑安其 (192.168.110.150)
+feiq[郑安其]> 你好
+feiq[郑安其]> /file ./example.txt
+feiq[郑安其]> /dir ./example-directory
+feiq[郑安其]> /image
 ```
 
-输入 `/` 会立即显示全部交互命令。继续输入命令前缀并按 `Tab`，可以自动补全唯一匹配项；存在多个匹配项时会显示候选命令并补全公共前缀。
+`/to` 支持用户名、主机名、完整 IP 或 IP 片段。输入 `/to 郑` 或 `/to 150` 时，当前输入行右侧会显示匹配联系人，按 `Tab` 补全为对应 IP。输入 `/` 时，命令候选同样显示在当前行右侧，不会在终端中不断产生新行。
 
 交互输入支持以下快捷操作：
 
 - `←` / `→`：移动输入光标，可在消息中间插入或删除中文、Emoji 和普通字符
-- `↑`：选择上一个发送目标，自动填入 `/send msg <IP> `
-- `↓`：返回较新的发送目标
-- `Tab`：补全命令；在 `/send file` 和 `/send dir` 的路径位置补全本地文件或目录
+- `↑` / `↓`：切换之前提交过的完整输入，并在回到末尾时恢复尚未提交的草稿
+- `Tab`：补全命令、`/to` 联系人，以及 `/file`、`/dir` 的本地路径
 
-最近发送目标会保存在本地历史中，程序重启后仍可通过上方向键选择。
+发送单行消息时不需要命令前缀；引号和反斜杠会作为普通消息内容原样发送。也可以明确使用：
+
+```text
+/msg 包含 "引号" 和 \反斜杠 的消息
+```
+
+发送多行消息：
+
+```text
+/compose
+第一行
+第二行
+.send
+```
+
+多行模式使用 `.send` 发送、`.cancel` 取消。
 
 文件路径包含空格时可以使用双引号：
 
 ```text
-/send file 192.168.110.150 "/Users/me/My Files/report.pdf"
+/file "/Users/me/My Files/report.pdf"
 ```
 
-macOS 下可以先复制一张截图或图片，再执行 `/send image <IP>`。程序会将剪贴板图片临时保存为 PNG，并通过普通文件协议发送；临时文件在传输结束后自动删除。对方收到的是普通 PNG 文件，不是飞秋聊天窗口中的原生图片消息。其他系统可以先将图片保存为文件，再使用 `/send file`。
+macOS 下可以先复制一张截图或图片，再执行 `/image`。程序会将剪贴板图片临时保存为 PNG，并通过普通文件协议发送；临时文件在传输结束后自动删除。对方收到的是普通 PNG 文件，不是飞秋聊天窗口中的原生图片消息。其他系统可以先将图片保存为文件，再使用 `/file`。
 
 交互消息默认使用不同颜色区分收发、附件、状态和错误。颜色模式可设置为：
 
@@ -198,16 +215,17 @@ macOS 下可以先复制一张截图或图片，再执行 `/send image <IP>`。�
 其他交互命令：
 
 ```text
-/search user
-/search user 张三
-/history 192.168.110.150
+/users
+/users 张三
+/history
+/history 张三
 /help
-exit
+/exit
 ```
 
-程序启动后会通过 IP Messenger 广播自动发现同一局域网中的在线用户，并每分钟刷新一次。`/search user` 会同时显示当前在线用户和聊天记录中的本地联系人；可以使用用户名、主机名或 IP 片段过滤。
+程序启动后会通过 IP Messenger 广播自动发现同一局域网中的在线用户，并每分钟刷新一次。`/users` 会同时显示当前在线用户和聊天记录中的本地联系人；可以使用用户名、主机名或 IP 片段过滤。
 
-`/history <IP>` 显示与指定 IP 最近的 50 条文本、文件和目录收发记录。历史默认保存在：
+`/history` 显示当前联系人的最近 50 条文本、文件和目录收发记录，也可以使用 `/history <用户名或 IP>` 查询其他联系人。历史默认保存在：
 
 ```text
 ~/.feiq-cli/history.jsonl
@@ -219,7 +237,7 @@ exit
 ./feiq-cli --history-file ./data/history.jsonl
 ```
 
-也支持 `quit`、`/exit` 和 `/quit` 退出。退出时程序会停止监听、取消未完成任务并恢复终端状态。
+旧版 `/send msg|file|dir|image <IP> ...` 和 `/search user ...` 命令仍然兼容。也支持 `exit`、`quit` 和 `/quit` 退出。退出时程序会停止监听、取消未完成任务并恢复终端状态。
 
 指定监听地址、显示名称和下载目录：
 
@@ -384,8 +402,9 @@ example-2.txt
 - 交互模式中并发发送消息和附件
 - IP Messenger 局域网在线用户自动发现
 - 本地 JSONL 聊天历史与用户检索
-- 彩色事件输出、Unicode 光标编辑和最近目标方向键选择
-- 文件与目录路径 Tab 补全
+- 彩色事件输出、Unicode 光标编辑和完整输入历史
+- 命令、联系人、文件与目录路径 Tab 补全
+- 当前联系人会话和多行消息编辑
 - macOS 剪贴板图片转普通 PNG 文件发送
 
 暂未支持：
@@ -403,6 +422,55 @@ example-2.txt
 ```bash
 go test -race ./...
 go vet ./...
+```
+
+## 发布 GitHub Release
+
+项目已经配置 `.github/workflows/release.yml`。推荐通过语义化版本标签触发自动发布，本机不需要安装 GitHub CLI。
+
+发布前先确认 `main` 已经提交并推送：
+
+```bash
+git switch main
+git pull --ff-only
+git status
+```
+
+创建带说明的版本标签并推送。首次发布可以使用 `v0.1.0`：
+
+```bash
+git tag -a v0.1.0 -m "feiq-cli v0.1.0"
+git push origin v0.1.0
+```
+
+标签推送后，GitHub Actions 会自动：
+
+1. 运行 `go test -race ./...`。
+2. 构建 macOS amd64、macOS arm64、Linux amd64 和 Linux arm64。
+3. 将二进制、`README.md`、`LICENSE` 和配置示例打成 `.tar.gz`。
+4. 生成 `checksums.txt`。
+5. 创建 GitHub Release 并自动生成 Release Notes。
+
+可以在仓库的 **Actions → Release** 查看进度，在 **Releases** 页面下载产物。
+
+发布前也可以在本机预演构建：
+
+```bash
+./scripts/build-release.sh v0.1.0
+```
+
+产物会写入：
+
+```text
+dist/v0.1.0/
+```
+
+同一版本目录已经存在时脚本会停止，避免意外覆盖已有产物。正式 Release 应当使用尚未发布的新版本号，例如 `v0.1.1`。
+
+Release 二进制包含标签版本、Git 提交和构建时间：
+
+```bash
+./feiq-cli version
 ```
 
 协议核心位于 `ipmsg` 包，常驻会话位于 `ipmsg/session.go`，交互终端位于 `internal/console`，CLI 入口位于 `cmd/feiq-cli`。可以在此基础上继续开发好友发现和传输任务管理等功能。

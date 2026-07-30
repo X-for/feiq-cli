@@ -1,3 +1,8 @@
 /feiq
 /feiq-cli
 /build/
+/dist/
+/downloads/
+/coverage.out
+.DS_Store
+*.log
