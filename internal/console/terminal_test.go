@@ -59,7 +59,7 @@ func TestDisplayWidth(t *testing.T) {
 	}
 }
 
-func TestCompletionHintStaysOnCurrentRow(t *testing.T) {
+func TestCompletionHintUsesOneReservedRow(t *testing.T) {
 	var output bytes.Buffer
 	terminal := &Terminal{
 		out:      &output,
@@ -67,12 +67,43 @@ func TestCompletionHintStaysOnCurrentRow(t *testing.T) {
 		line:     []rune("/"),
 		commands: []string{"/to ", "/file ", "/help"},
 	}
+	terminal.reserveHintRowLocked()
 	terminal.redrawLocked(true)
-	if strings.Contains(output.String(), "\n") || strings.Contains(output.String(), "\r\n") {
-		t.Fatalf("completion hint added a new row: %q", output.String())
+	terminal.redrawLocked(true)
+	if got := strings.Count(output.String(), "\r\n"); got != 1 {
+		t.Fatalf("completion hint reserved %d rows, want 1: %q", got, output.String())
 	}
 	if !strings.Contains(output.String(), "/to") {
 		t.Fatalf("completion hint missing candidates: %q", output.String())
+	}
+}
+
+func TestCompletionHintDoesNotDependOnInputLength(t *testing.T) {
+	terminal := &Terminal{
+		prompt: "feiq[Alice]> ",
+		line:   []rune("/file /a/very/long/path/that/used/to/hide/the/hint/"),
+		completer: func(string) []Completion {
+			return []Completion{{Display: "one.jpg"}, {Display: "two.jpg"}}
+		},
+	}
+	if got := terminal.completionHintLocked(); !strings.Contains(got, "one.jpg") {
+		t.Fatalf("long input hid completion hint: %q", got)
+	}
+}
+
+func TestRedrawWithoutHintRestoresCursorFromLineStart(t *testing.T) {
+	var output bytes.Buffer
+	terminal := &Terminal{out: &output, prompt: "feiq> ", line: []rune("abc"), cursor: 1}
+	terminal.redrawLocked(false)
+	if !strings.HasSuffix(output.String(), "\r\x1b[7C") {
+		t.Fatalf("cursor was not restored from line start: %q", output.String())
+	}
+}
+
+func TestFormatCompletionHintShowsRemainingCount(t *testing.T) {
+	got := formatCompletionHint([]string{"first-long-name.jpg", "second.jpg", "third.jpg"}, 24)
+	if displayWidth([]rune(got)) > 24 || !strings.Contains(got, "+2") {
+		t.Fatalf("unexpected compact hint: %q", got)
 	}
 }
 
@@ -87,6 +118,31 @@ func TestStructuredCompletion(t *testing.T) {
 	terminal.completeLocked()
 	if got := string(terminal.line); got != "/to 192.168.1.2" {
 		t.Fatalf("unexpected completion: %q", got)
+	}
+}
+
+func TestTabCyclesCompletionsWithoutLongerCommonPrefix(t *testing.T) {
+	terminal := &Terminal{
+		out:  io.Discard,
+		line: []rune("/file "),
+		completer: func(string) []Completion {
+			return []Completion{
+				{Value: "/file alpha.jpg", Display: "alpha.jpg"},
+				{Value: "/file beta.jpg", Display: "beta.jpg"},
+			}
+		},
+	}
+	terminal.completeLocked()
+	if got := string(terminal.line); got != "/file alpha.jpg" {
+		t.Fatalf("first completion = %q", got)
+	}
+	terminal.completeLocked()
+	if got := string(terminal.line); got != "/file beta.jpg" {
+		t.Fatalf("second completion = %q", got)
+	}
+	terminal.detachHistoryLocked()
+	if len(terminal.completionMatches) != 0 {
+		t.Fatal("editing did not reset completion cycle")
 	}
 }
 

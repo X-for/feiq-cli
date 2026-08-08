@@ -36,8 +36,8 @@ type Completion struct {
 type Completer func(line string) []Completion
 
 // Terminal is a small Unicode-aware line editor. Async output clears and
-// redraws the active input row. Completion hints share that row so repeated
-// input never appends hint lines to the scrollback.
+// redraws the active input row. One row below the input is reserved for
+// completion hints and refreshed in place.
 type Terminal struct {
 	in          *os.File
 	out         io.Writer
@@ -58,6 +58,10 @@ type Terminal struct {
 	history   []string
 	historyAt int
 	draft     []rune
+	hintRow   bool
+
+	completionMatches []Completion
+	completionAt      int
 }
 
 func New(in *os.File, out io.Writer, prompt string) (*Terminal, error) {
@@ -125,7 +129,7 @@ func (t *Terminal) Close() error {
 	}
 	t.closed = true
 	if t.interactive {
-		_, _ = io.WriteString(t.out, "\r\x1b[2K")
+		t.clearInputLocked()
 		return term.Restore(int(t.in.Fd()), t.oldState)
 	}
 	return nil
@@ -147,6 +151,8 @@ func (t *Terminal) ReadLine() (string, error) {
 	t.cursor = 0
 	t.historyAt = len(t.history)
 	t.draft = t.draft[:0]
+	t.resetCompletionLocked()
+	t.reserveHintRowLocked()
 	t.redrawLocked(true)
 	t.mu.Unlock()
 
@@ -178,6 +184,7 @@ func (t *Terminal) ReadLine() (string, error) {
 			t.cursor = 0
 			t.reading = false
 			_, _ = io.WriteString(t.out, "\r\n")
+			t.hintRow = false
 			t.mu.Unlock()
 			return line, nil
 		case 8, 127:
@@ -211,11 +218,13 @@ func (t *Terminal) ReadLine() (string, error) {
 				case 'B':
 					t.selectHistoryLocked(1)
 				case 'C':
+					t.resetCompletionLocked()
 					if t.cursor < len(t.line) {
 						t.cursor++
 					}
 					t.redrawLocked(true)
 				case 'D':
+					t.resetCompletionLocked()
 					if t.cursor > 0 {
 						t.cursor--
 					}
@@ -252,10 +261,11 @@ func (t *Terminal) Printf(format string, args ...any) {
 	defer t.mu.Unlock()
 	if t.interactive {
 		message = strings.ReplaceAll(message, "\n", "\r\n")
-		_, _ = io.WriteString(t.out, "\r\x1b[2K")
+		t.clearInputLocked()
 		_, _ = io.WriteString(t.out, message)
 		_, _ = io.WriteString(t.out, "\r\n")
 		if t.reading {
+			t.reserveHintRowLocked()
 			t.redrawLocked(true)
 		}
 		return
@@ -280,11 +290,13 @@ func (t *Terminal) finishRead() {
 	t.reading = false
 	t.line = t.line[:0]
 	t.cursor = 0
-	_, _ = io.WriteString(t.out, "\r\x1b[2K\r\n")
+	t.clearInputLocked()
+	_, _ = io.WriteString(t.out, "\r\n")
+	t.hintRow = false
 }
 
 func (t *Terminal) redrawLocked(showHint bool) {
-	_, _ = io.WriteString(t.out, "\r\x1b[2K")
+	t.clearInputLocked()
 	_, _ = io.WriteString(t.out, t.prompt)
 	_, _ = io.WriteString(t.out, string(t.line))
 
@@ -293,20 +305,44 @@ func (t *Terminal) redrawLocked(showHint bool) {
 		hint = t.completionHintLocked()
 	}
 	if hint != "" {
+		_, _ = io.WriteString(t.out, "\x1b[1B\r\x1b[2K")
 		if t.colors {
 			_, _ = io.WriteString(t.out, "\x1b["+string(ColorGray)+"m"+hint+"\x1b[0m")
 		} else {
 			_, _ = io.WriteString(t.out, hint)
 		}
+		_, _ = io.WriteString(t.out, "\x1b[1A\r")
 	}
 
-	columns := displayWidth(t.line[t.cursor:]) + displayWidth([]rune(hint))
+	_, _ = io.WriteString(t.out, "\r")
+	columns := displayWidth([]rune(t.prompt)) + displayWidth(t.line[:t.cursor])
 	if columns > 0 {
-		_, _ = fmt.Fprintf(t.out, "\x1b[%dD", columns)
+		_, _ = fmt.Fprintf(t.out, "\x1b[%dC", columns)
 	}
 }
 
+func (t *Terminal) reserveHintRowLocked() {
+	_, _ = io.WriteString(t.out, "\r\n\x1b[1A")
+	t.hintRow = true
+}
+
+func (t *Terminal) clearInputLocked() {
+	_, _ = io.WriteString(t.out, "\r\x1b[2K")
+	if !t.hintRow {
+		return
+	}
+	_, _ = io.WriteString(t.out, "\x1b[1B\r\x1b[2K\x1b[1A\r")
+}
+
 func (t *Terminal) completeLocked() {
+	if len(t.completionMatches) > 0 {
+		t.completionAt = (t.completionAt + 1) % len(t.completionMatches)
+		t.line = []rune(t.completionMatches[t.completionAt].Value)
+		t.cursor = len(t.line)
+		t.redrawLocked(true)
+		return
+	}
+
 	prefix := string(t.line)
 	matches := t.matchingCompletionsLocked(prefix)
 	if len(matches) == 0 {
@@ -325,6 +361,12 @@ func (t *Terminal) completeLocked() {
 	if len(completion) > len(prefix) {
 		t.detachHistoryLocked()
 		t.line = []rune(completion)
+		t.cursor = len(t.line)
+	} else if len(matches) > 1 {
+		t.detachHistoryLocked()
+		t.completionMatches = append([]Completion(nil), matches...)
+		t.completionAt = 0
+		t.line = []rune(matches[0].Value)
 		t.cursor = len(t.line)
 	}
 	t.redrawLocked(true)
@@ -359,25 +401,42 @@ func (t *Terminal) completionHintLocked() string {
 		}
 		displays = append(displays, display)
 	}
-	hint := "  [" + strings.Join(displays, " | ") + "]"
-	return t.fitHintLocked(hint)
+	return formatCompletionHint(displays, t.terminalWidthLocked()-1)
 }
 
-func (t *Terminal) fitHintLocked(hint string) string {
+func (t *Terminal) terminalWidthLocked() int {
 	width := 120
 	if t.interactive {
 		if columns, _, err := term.GetSize(int(t.in.Fd())); err == nil && columns > 0 {
 			width = columns
 		}
 	}
-	available := width - displayWidth([]rune(t.prompt)) - displayWidth(t.line) - 1
-	if available < 8 {
+	return width
+}
+
+func formatCompletionHint(displays []string, maxWidth int) string {
+	if len(displays) == 0 || maxWidth < 4 {
 		return ""
 	}
-	if displayWidth([]rune(hint)) <= available {
-		return hint
+	for count := len(displays); count >= 1; count-- {
+		parts := append([]string(nil), displays[:count]...)
+		if remaining := len(displays) - count; remaining > 0 {
+			parts = append(parts, fmt.Sprintf("+%d", remaining))
+		}
+		hint := "[" + strings.Join(parts, " | ") + "]"
+		if displayWidth([]rune(hint)) <= maxWidth {
+			return hint
+		}
 	}
-	return truncateWidth(hint, available)
+	suffix := ""
+	if len(displays) > 1 {
+		suffix = fmt.Sprintf(" | +%d", len(displays)-1)
+	}
+	available := maxWidth - displayWidth([]rune("["+suffix+"]"))
+	if available < 2 {
+		return truncateWidth("[+"+fmt.Sprint(len(displays))+"]", maxWidth)
+	}
+	return "[" + truncateWidth(displays[0], available) + suffix + "]"
 }
 
 func (t *Terminal) rememberLineLocked(line string) {
@@ -395,6 +454,7 @@ func (t *Terminal) rememberLineLocked(line string) {
 }
 
 func (t *Terminal) selectHistoryLocked(direction int) {
+	t.resetCompletionLocked()
 	if len(t.history) == 0 {
 		t.redrawLocked(true)
 		return
@@ -419,10 +479,16 @@ func (t *Terminal) selectHistoryLocked(direction int) {
 }
 
 func (t *Terminal) detachHistoryLocked() {
+	t.resetCompletionLocked()
 	if t.historyAt != len(t.history) {
 		t.historyAt = len(t.history)
 		t.draft = t.draft[:0]
 	}
+}
+
+func (t *Terminal) resetCompletionLocked() {
+	t.completionMatches = t.completionMatches[:0]
+	t.completionAt = -1
 }
 
 func displayWidth(value []rune) int {
