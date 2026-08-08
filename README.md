@@ -294,6 +294,35 @@ macOS 下可以先复制一张截图或图片，再执行 `/image`。程序会�
 
 > `receive` 当前会自动下载附件，建议仅在受信任的局域网内使用。
 
+## 为独立 Web UI 提供 API
+
+`api` 子命令复用 CLI 的 IP Messenger 会话、用户发现、历史记录和附件收发能力，但不包含 Web 页面：
+
+独立的 Vue 界面位于 [`X-for/feiq-web`](https://github.com/X-for/feiq-web)。
+
+```bash
+./feiq-cli api
+```
+
+默认 API 地址是 `http://127.0.0.1:8080`。独立 Vue 项目可通过 HTTP API 查询联系人和历史记录，通过 SSE 接收实时消息和传输状态。
+
+如果前端不通过同源代理访问，需要显式允许它的浏览器来源：
+
+```bash
+./feiq-cli api --allow-origin http://127.0.0.1:5173
+```
+
+API 默认只监听本机。需要暴露到局域网时必须明确启用：
+
+```bash
+./feiq-cli api \
+  --listen 0.0.0.0:8080 \
+  --allow-remote \
+  --allow-origin http://192.168.110.25:5173
+```
+
+API 尚无身份认证，只应在受信任局域网中使用。
+
 ### 发送消息
 
 ```bash
