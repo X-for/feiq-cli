@@ -11,6 +11,10 @@ import (
 )
 
 func TestParseInteractiveCommand(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		line    string
 		kind    string
@@ -22,6 +26,8 @@ func TestParseInteractiveCommand(t *testing.T) {
 		{"/to 郑安其", "select", "", "郑安其"},
 		{"/file \"/tmp/a file.txt\"", "file", "", "/tmp/a file.txt"},
 		{"/dir ./folder", "dir", "", "./folder"},
+		{"/file ~/Desktop/report.txt", "file", "", filepath.Join(home, "Desktop/report.txt")},
+		{"/dir \"~/Desktop/My Folder\"", "dir", "", filepath.Join(home, "Desktop/My Folder")},
 		{"/image", "image", "", ""},
 		{"/compose", "compose", "", ""},
 		{"/users alice", "users", "", "alice"},
@@ -31,6 +37,7 @@ func TestParseInteractiveCommand(t *testing.T) {
 		{"/send msg 192.168.1.2 \" \\\\ \"", "msg", "192.168.1.2", "\" \\\\ \""},
 		{"/send file 192.168.1.2 \"/tmp/a file.txt\"", "file", "192.168.1.2", "/tmp/a file.txt"},
 		{"/send dir 192.168.1.2 ./folder", "dir", "192.168.1.2", "./folder"},
+		{"/send dir 192.168.1.2 ~/Desktop/folder", "dir", "192.168.1.2", filepath.Join(home, "Desktop/folder")},
 		{"/send image 192.168.1.2", "image", "192.168.1.2", ""},
 		{"/search user", "users", "", ""},
 		{"/search user alice", "users", "", "alice"},

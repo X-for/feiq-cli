@@ -347,6 +347,7 @@ func parseInteractiveCommand(line string) (interactiveCommand, error) {
 		if unquoted, err := strconv.Unquote(path); err == nil {
 			path = unquoted
 		}
+		path = expandHomePath(path)
 		if path == "" {
 			return interactiveCommand{}, fmt.Errorf("用法: %s <路径>", command)
 		}
@@ -394,6 +395,7 @@ func parseInteractiveCommand(line string) (interactiveCommand, error) {
 		if unquoted, err := strconv.Unquote(payload); err == nil {
 			payload = unquoted
 		}
+		payload = expandHomePath(payload)
 	}
 	if payload == "" {
 		return interactiveCommand{}, fmt.Errorf("发送内容不能为空")
