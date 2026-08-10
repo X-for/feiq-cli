@@ -1,6 +1,6 @@
 # feiq-cli
 
-`feiq-cli` 是一个使用 Go 实现的 IP Messenger/飞秋兼容命令行工具，可通过指定 IP 完成文本消息、普通文件和递归目录的发送与接收。
+`feiq-cli` 是一个使用 Go 实现的 IP Messenger/飞秋兼容工具，可通过命令行或内嵌 Web 界面完成文本消息、普通文件和递归目录的发送与接收。
 
 - UDP 2425：文本消息与附件通知
 - TCP 2425：文件和目录数据传输
@@ -12,6 +12,7 @@
 - macOS 或 Linux
 - 本机 UDP/TCP 2425 端口未被其他飞秋、IP Messenger 或 `feiq-cli` 进程占用
 - 建议安装 `iconv`，以确保中文名称、消息和文件名兼容传统飞秋客户端
+- 只有修改 Web 源码时才需要 Node.js 24；普通编译和运行不需要 Node.js
 
 检查 Go 环境：
 
@@ -46,6 +47,8 @@ go test ./...
 ```bash
 go build -o feiq-cli ./cmd/feiq-cli
 ```
+
+Web 页面已经作为静态资源嵌入 Go 二进制，因此编译后不需要单独安装或启动前端。
 
 确认程序可以运行：
 
@@ -294,34 +297,42 @@ macOS 下可以先复制一张截图或图片，再执行 `/image`。程序会�
 
 > `receive` 当前会自动下载附件，建议仅在受信任的局域网内使用。
 
-## 为独立 Web UI 提供 API
+## Web 图形界面
 
-`api` 子命令复用 CLI 的 IP Messenger 会话、用户发现、历史记录和附件收发能力，但不包含 Web 页面：
-
-独立的 Vue 界面位于 [`X-for/feiq-web`](https://github.com/X-for/feiq-web)。
+执行一个命令即可同时启动 IP Messenger 会话、HTTP API 和内嵌 Vue 页面：
 
 ```bash
-./feiq-cli api
+./feiq-cli web
 ```
 
-默认 API 地址是 `http://127.0.0.1:8080`。独立 Vue 项目可通过 HTTP API 查询联系人和历史记录，通过 SSE 接收实时消息和传输状态。
+浏览器访问 `http://127.0.0.1:2426`。Web 界面支持联系人发现与搜索、历史记录、实时消息、文件和目录收发、粘贴图片以及附件下载。
 
-如果前端不通过同源代理访问，需要显式允许它的浏览器来源：
+默认只允许本机访问。需要让局域网内其他设备打开页面时，必须明确启用：
+
 
 ```bash
-./feiq-cli api --allow-origin http://127.0.0.1:5173
+./feiq-cli web --listen 0.0.0.0:2426 --allow-remote
 ```
 
-API 默认只监听本机。需要暴露到局域网时必须明确启用：
+Web 服务尚无身份认证，启用远程访问后，同一网络中能访问该端口的设备可以操作本机发送消息和附件，因此只应在受信任局域网中使用。
+
+### Web UI 二次开发
+
+Vue 3 + TypeScript 源码位于 `web/`，Go 服务代码位于 `cmd/feiq-cli/`，两部分在同一仓库中保持目录分离。前端开发时：
 
 ```bash
-./feiq-cli api \
-  --listen 0.0.0.0:8080 \
-  --allow-remote \
-  --allow-origin http://192.168.110.25:5173
+cd web
+npm install
+npm run dev
 ```
 
-API 尚无身份认证，只应在受信任局域网中使用。
+Vite 页面运行在 `http://127.0.0.1:5173`，并将 `/api` 代理到 `http://127.0.0.1:2426`。另一个终端启动后端：
+
+```bash
+go run ./cmd/feiq-cli web
+```
+
+修改前端后运行 `cd web && npm run build`，将最新资源更新到 `web/dist`。`api` 子命令仍然保留，可在不提供页面时单独启动 HTTP API；跨域前端需要使用 `--allow-origin`。
 
 ### 发送消息
 

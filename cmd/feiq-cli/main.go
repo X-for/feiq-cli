@@ -59,6 +59,8 @@ func main() {
 		err = receive(os.Args[2:])
 	case "api":
 		err = apiMode(os.Args[2:])
+	case "web":
+		err = webMode(os.Args[2:])
 	case "version":
 		printVersion(os.Stdout)
 	case "help", "-h", "--help":
@@ -195,7 +197,8 @@ Usage:
   feiq-cli send-file    --to IP --path FILE [options]
   feiq-cli send-dir     --to IP --path DIRECTORY [options]
   feiq-cli receive      [--output DIRECTORY] [options]
-  feiq-cli api          [--listen 127.0.0.1:8080] [options]
+  feiq-cli web          [--listen 127.0.0.1:2426] [options]
+  feiq-cli api          [--listen 127.0.0.1:2426] [options]
   feiq-cli version
 
 All commands accept --bind, --port, --name, --host and --version.

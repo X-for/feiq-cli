@@ -25,6 +25,7 @@ import (
 
 	"feiq-cli/internal/history"
 	"feiq-cli/ipmsg"
+	webassets "feiq-cli/web"
 )
 
 const maxWebUploadBytes int64 = 2 << 30
@@ -104,16 +105,28 @@ type webApp struct {
 }
 
 func apiMode(args []string) error {
+	return httpMode(args, nil)
+}
+
+func webMode(args []string) error {
+	return httpMode(args, webassets.Handler())
+}
+
+func httpMode(args []string, frontend http.Handler) error {
 	config, configPath, err := loadAppConfig(args)
 	if err != nil {
 		return err
 	}
-	flags := flag.NewFlagSet("api", flag.ContinueOnError)
+	command := "api"
+	if frontend != nil {
+		command = "web"
+	}
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	var common commonFlags
 	common.add(flags, config)
 	addConfigFlag(flags, configPath)
-	listen := flags.String("listen", "127.0.0.1:8080", "HTTP API listen address")
-	allowRemote := flags.Bool("allow-remote", false, "allow the API to listen beyond localhost (no authentication)")
+	listen := flags.String("listen", "127.0.0.1:2426", "HTTP API listen address")
+	allowRemote := flags.Bool("allow-remote", false, "allow the HTTP service to listen beyond localhost (no authentication)")
 	allowOrigin := flags.String("allow-origin", "", "optional browser origin allowed to call the API, for example http://127.0.0.1:5173")
 	output := flags.String("output", configString(config.Output, "./downloads"), "directory for received files and directories")
 	historyPath := flags.String("history-file", configString(config.HistoryFile, history.DefaultPath()), "local JSONL chat history file")
@@ -162,15 +175,19 @@ func apiMode(args []string) error {
 
 	server := &http.Server{
 		Addr:              *listen,
-		Handler:           app.routes(),
+		Handler:           app.routes(frontend),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
 	listener, err := net.Listen("tcp", *listen)
 	if err != nil {
-		return fmt.Errorf("listen HTTP API on %s: %w", *listen, err)
+		return fmt.Errorf("listen HTTP service on %s: %w", *listen, err)
 	}
-	fmt.Printf("feiq-cli API: http://%s\n", browserAddress(listener.Addr()))
+	label := "API"
+	if frontend != nil {
+		label = "Web UI"
+	}
+	fmt.Printf("feiq-cli %s: http://%s\n", label, browserAddress(listener.Addr()))
 	fmt.Printf("IPMsg: %s:%d; attachments: %s\n", common.bind, common.port, absOutput)
 
 	serverErrors := make(chan error, 1)
@@ -213,7 +230,7 @@ func validateWebListen(address string, allowRemote bool) error {
 	parsed := net.ParseIP(host)
 	local := strings.EqualFold(host, "localhost") || parsed != nil && parsed.IsLoopback()
 	if !local && !allowRemote {
-		return fmt.Errorf("refusing non-local API listener %s without --allow-remote; the API has no authentication", address)
+		return fmt.Errorf("refusing non-local HTTP listener %s without --allow-remote; the service has no authentication", address)
 	}
 	return nil
 }
@@ -229,7 +246,7 @@ func browserAddress(address net.Addr) string {
 	return net.JoinHostPort(host, port)
 }
 
-func (app *webApp) routes() http.Handler {
+func (app *webApp) routes(frontend ...http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", app.handleStatus)
 	mux.HandleFunc("GET /api/contacts", app.handleContacts)
@@ -240,6 +257,9 @@ func (app *webApp) routes() http.Handler {
 	mux.HandleFunc("POST /api/send-path", app.sameOrigin(app.handleSendPath))
 	mux.HandleFunc("POST /api/upload", app.sameOrigin(app.handleUpload))
 	mux.HandleFunc("GET /api/download", app.handleDownload)
+	if len(frontend) > 0 && frontend[0] != nil {
+		mux.Handle("GET /", frontend[0])
+	}
 	return securityHeaders(app.cors(mux))
 }
 
@@ -485,7 +505,7 @@ func (app *webApp) handleUpload(writer http.ResponseWriter, request *http.Reques
 		writeAPIError(writer, http.StatusBadRequest, "send one file per upload")
 		return
 	}
-	tempRoot, err := os.MkdirTemp("", "feiq-web-upload-*")
+	tempRoot, err := os.MkdirTemp("", "feiq-cli-web-upload-*")
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, err.Error())
 		return

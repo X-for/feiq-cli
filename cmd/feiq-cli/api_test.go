@@ -101,6 +101,25 @@ func TestAPIStatusAndSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestWebRoutesServeFrontendAndKeepAPI(t *testing.T) {
+	app := newTestWebApp(t, &fakeWebSession{})
+	frontend := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "embedded frontend")
+	})
+
+	pageResponse := httptest.NewRecorder()
+	app.routes(frontend).ServeHTTP(pageResponse, httptest.NewRequest(http.MethodGet, "/", nil))
+	if pageResponse.Code != http.StatusOK || pageResponse.Body.String() != "embedded frontend" {
+		t.Fatalf("unexpected frontend response: status=%d body=%q", pageResponse.Code, pageResponse.Body.String())
+	}
+
+	apiResponse := httptest.NewRecorder()
+	app.routes(frontend).ServeHTTP(apiResponse, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	if apiResponse.Code != http.StatusOK || !strings.Contains(apiResponse.Body.String(), `"ready":true`) {
+		t.Fatalf("unexpected API response: status=%d body=%q", apiResponse.Code, apiResponse.Body.String())
+	}
+}
+
 func TestWebContactsMergeOnlineAndHistory(t *testing.T) {
 	session := &fakeWebSession{peers: []ipmsg.Peer{{IP: "192.168.1.2", Name: "在线昵称", Host: "desktop", LastSeen: time.Now()}}}
 	app := newTestWebApp(t, session)
@@ -128,8 +147,8 @@ func TestWebMessageAPIKeepsMultilineAndSymbols(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/messages", bytes.NewReader(body))
-	request.Host = "127.0.0.1:8080"
-	request.Header.Set("Origin", "http://127.0.0.1:8080")
+	request.Host = "127.0.0.1:2426"
+	request.Header.Set("Origin", "http://127.0.0.1:2426")
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
@@ -199,7 +218,7 @@ func TestWebDirectoryUploadPreservesTreeAndCleansUp(t *testing.T) {
 func TestWebRejectsCrossOriginMutation(t *testing.T) {
 	app := newTestWebApp(t, &fakeWebSession{})
 	request := httptest.NewRequest(http.MethodPost, "/api/discover", nil)
-	request.Host = "127.0.0.1:8080"
+	request.Host = "127.0.0.1:2426"
 	request.Header.Set("Origin", "https://example.com")
 	response := httptest.NewRecorder()
 	app.routes().ServeHTTP(response, request)
@@ -222,13 +241,13 @@ func TestSafeUploadPath(t *testing.T) {
 }
 
 func TestValidateWebListenRequiresExplicitRemoteAccess(t *testing.T) {
-	if err := validateWebListen("127.0.0.1:8080", false); err != nil {
+	if err := validateWebListen("127.0.0.1:2426", false); err != nil {
 		t.Fatalf("localhost should be accepted: %v", err)
 	}
-	if err := validateWebListen("0.0.0.0:8080", false); err == nil {
+	if err := validateWebListen("0.0.0.0:2426", false); err == nil {
 		t.Fatal("remote listener should require --allow-remote")
 	}
-	if err := validateWebListen("0.0.0.0:8080", true); err != nil {
+	if err := validateWebListen("0.0.0.0:2426", true); err != nil {
 		t.Fatalf("explicit remote listener should be accepted: %v", err)
 	}
 }
