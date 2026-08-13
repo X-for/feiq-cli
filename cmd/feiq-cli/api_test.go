@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +72,10 @@ func (session *fakeWebSession) SendPath(_ context.Context, target, path string) 
 }
 
 func newTestWebApp(t *testing.T, session *fakeWebSession) *webApp {
+	return newTestWebAppAtRoot(t, session, t.TempDir())
+}
+
+func newTestWebAppAtRoot(t *testing.T, session *fakeWebSession, root string) *webApp {
 	t.Helper()
 	store, err := history.Open(filepath.Join(t.TempDir(), "history.jsonl"))
 	if err != nil {
@@ -83,8 +87,109 @@ func newTestWebApp(t *testing.T, session *fakeWebSession) *webApp {
 		history:      store,
 		hub:          newWebHub(),
 		outputDir:    t.TempDir(),
+		paths:        newPathAccess([]string{root}),
 		messageWait:  time.Second,
 		transferWait: time.Second,
+	}
+}
+
+func TestWebPathsListsDefaultRootAndChildDirectory(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "documents")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "message.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestWebAppAtRoot(t, &fakeWebSession{}, root)
+
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/paths", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("default root status=%d body=%s", response.Code, response.Body.String())
+	}
+	var rootListing pathListing
+	if err := json.Unmarshal(response.Body.Bytes(), &rootListing); err != nil {
+		t.Fatal(err)
+	}
+	if rootListing.Path != root || rootListing.Root != root || len(rootListing.Roots) != 1 || rootListing.Roots[0] != root {
+		t.Fatalf("unexpected root listing: %#v", rootListing)
+	}
+	if len(rootListing.Entries) != 1 || rootListing.Entries[0].Path != child || rootListing.Entries[0].Kind != "dir" {
+		t.Fatalf("unexpected root entries: %#v", rootListing.Entries)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/paths?path="+url.QueryEscape(child), nil)
+	response = httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("child status=%d body=%s", response.Code, response.Body.String())
+	}
+	var childListing pathListing
+	if err := json.Unmarshal(response.Body.Bytes(), &childListing); err != nil {
+		t.Fatal(err)
+	}
+	if childListing.Path != child || childListing.Parent != root || len(childListing.Entries) != 1 || childListing.Entries[0].Name != "message.txt" {
+		t.Fatalf("unexpected child listing: %#v", childListing)
+	}
+}
+
+func TestWebPathsRejectOutsideRoot(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	app := newTestWebAppAtRoot(t, &fakeWebSession{}, root)
+	request := httptest.NewRequest(http.MethodGet, "/api/paths?path="+url.QueryEscape(outside), nil)
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWebSendPathRejectsOutsideRootAndAllowsInside(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	allowed := filepath.Join(root, "allowed.txt")
+	blocked := filepath.Join(outside, "blocked.txt")
+	for _, path := range []string{allowed, blocked} {
+		if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := &fakeWebSession{pathCh: make(chan struct{})}
+	app := newTestWebAppAtRoot(t, session, root)
+
+	body, _ := json.Marshal(map[string]string{"to": "192.168.1.2", "path": blocked, "kind": "file"})
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/send-path", bytes.NewReader(body)))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("outside status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	body, _ = json.Marshal(map[string]string{"to": "192.168.1.2", "path": allowed, "kind": "file"})
+	response = httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/send-path", bytes.NewReader(body)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("inside status=%d body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-session.pathCh:
+	case <-time.After(time.Second):
+		t.Fatal("allowed path send did not start")
+	}
+	session.mu.Lock()
+	sent := session.paths[0]
+	session.mu.Unlock()
+	if sent != "192.168.1.2\x00"+allowed {
+		t.Fatalf("unexpected sent path: %q", sent)
+	}
+}
+
+func TestWebUploadRemoved(t *testing.T) {
+	app := newTestWebApp(t, &fakeWebSession{})
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/upload", nil))
+	if response.Code != http.StatusNotFound && response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -172,49 +277,6 @@ func TestWebMessageAPIKeepsMultilineAndSymbols(t *testing.T) {
 	}
 }
 
-func TestWebDirectoryUploadPreservesTreeAndCleansUp(t *testing.T) {
-	session := &fakeWebSession{pathCh: make(chan struct{}), pathDone: make(chan struct{})}
-	app := newTestWebApp(t, session)
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("to", "192.168.1.2")
-	_ = writer.WriteField("kind", "dir")
-	_ = writer.WriteField("paths", "album/a.txt")
-	part, err := writer.CreateFormFile("files", "a.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.WriteString(part, "content")
-	_ = writer.Close()
-	request := httptest.NewRequest(http.MethodPost, "/api/upload", &body)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	response := httptest.NewRecorder()
-	app.routes().ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-	}
-	select {
-	case <-session.pathCh:
-	case <-time.After(time.Second):
-		t.Fatal("directory send did not start")
-	}
-	session.mu.Lock()
-	sent := strings.SplitN(session.paths[0], "\x00", 2)[1]
-	session.mu.Unlock()
-	if content, err := os.ReadFile(filepath.Join(sent, "a.txt")); err != nil || string(content) != "content" {
-		t.Fatalf("directory tree was not preserved: content=%q err=%v", content, err)
-	}
-	close(session.pathDone)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Dir(sent)); os.IsNotExist(err) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("temporary upload directory was not removed")
-}
-
 func TestWebRejectsCrossOriginMutation(t *testing.T) {
 	app := newTestWebApp(t, &fakeWebSession{})
 	request := httptest.NewRequest(http.MethodPost, "/api/discover", nil)
@@ -224,19 +286,6 @@ func TestWebRejectsCrossOriginMutation(t *testing.T) {
 	app.routes().ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin request status=%d", response.Code)
-	}
-}
-
-func TestSafeUploadPath(t *testing.T) {
-	root := t.TempDir()
-	for _, unsafe := range []string{"../secret", "/tmp/secret", "folder/../../secret"} {
-		if _, err := safeUploadPath(root, unsafe); err == nil {
-			t.Fatalf("%q should be rejected", unsafe)
-		}
-	}
-	got, err := safeUploadPath(root, "folder/file.txt")
-	if err != nil || got != filepath.Join(root, "folder/file.txt") {
-		t.Fatalf("safe path=%q err=%v", got, err)
 	}
 }
 

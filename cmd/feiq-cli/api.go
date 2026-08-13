@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,8 +26,6 @@ import (
 	"feiq-cli/ipmsg"
 	webassets "feiq-cli/web"
 )
-
-const maxWebUploadBytes int64 = 2 << 30
 
 type webSession interface {
 	Discover() error
@@ -99,6 +96,7 @@ type webApp struct {
 	history      *history.Store
 	hub          *webHub
 	outputDir    string
+	paths        *pathAccess
 	messageWait  time.Duration
 	transferWait time.Duration
 	allowOrigin  string
@@ -141,6 +139,10 @@ func httpMode(args []string, frontend http.Handler) error {
 	if err := validateAllowedOrigin(*allowOrigin); err != nil {
 		return err
 	}
+	roots, err := configuredWebRoots(config)
+	if err != nil {
+		return fmt.Errorf("configure Web path roots: %w", err)
+	}
 	store, err := history.Open(*historyPath)
 	if err != nil {
 		return err
@@ -158,6 +160,7 @@ func httpMode(args []string, frontend http.Handler) error {
 		history:      store,
 		hub:          hub,
 		outputDir:    absOutput,
+		paths:        newPathAccess(roots),
 		messageWait:  *messageWait,
 		transferWait: *transferWait,
 		allowOrigin:  strings.TrimSuffix(*allowOrigin, "/"),
@@ -254,8 +257,8 @@ func (app *webApp) routes(frontend ...http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/history", app.handleHistory)
 	mux.HandleFunc("GET /api/events", app.handleEvents)
 	mux.HandleFunc("POST /api/messages", app.sameOrigin(app.handleMessage))
+	mux.HandleFunc("GET /api/paths", app.handlePaths)
 	mux.HandleFunc("POST /api/send-path", app.sameOrigin(app.handleSendPath))
-	mux.HandleFunc("POST /api/upload", app.sameOrigin(app.handleUpload))
 	mux.HandleFunc("GET /api/download", app.handleDownload)
 	if len(frontend) > 0 && frontend[0] != nil {
 		mux.Handle("GET /", frontend[0])
@@ -456,14 +459,19 @@ func (app *webApp) handleSendPath(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	body.To = strings.TrimSpace(body.To)
-	body.Path = expandHomePath(strings.TrimSpace(body.Path))
+	body.Path = strings.TrimSpace(body.Path)
 	if body.To == "" || body.Path == "" {
 		writeAPIError(writer, http.StatusBadRequest, "to and path are required")
 		return
 	}
-	info, err := os.Stat(body.Path)
+	resolvedPath, _, err := app.paths.Resolve(body.Path)
 	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, err.Error())
+		writePathAPIError(writer, err)
+		return
+	}
+	info, err := os.Stat(resolvedPath)
+	if err != nil {
+		writePathAPIError(writer, err)
 		return
 	}
 	kind := "file"
@@ -477,7 +485,7 @@ func (app *webApp) handleSendPath(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, "selected path does not match kind")
 		return
 	}
-	operationID, err := app.startPathTransfer(body.To, body.Path, kind, "")
+	operationID, err := app.startPathTransfer(body.To, resolvedPath, kind, "")
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, err.Error())
 		return
@@ -485,76 +493,48 @@ func (app *webApp) handleSendPath(writer http.ResponseWriter, request *http.Requ
 	writeJSON(writer, http.StatusAccepted, map[string]string{"operation_id": operationID})
 }
 
-func (app *webApp) handleUpload(writer http.ResponseWriter, request *http.Request) {
-	request.Body = http.MaxBytesReader(writer, request.Body, maxWebUploadBytes)
-	if err := request.ParseMultipartForm(32 << 20); err != nil {
-		writeAPIError(writer, http.StatusBadRequest, "cannot read upload: "+err.Error())
+func (app *webApp) handlePaths(writer http.ResponseWriter, request *http.Request) {
+	if app.paths == nil || len(app.paths.roots) == 0 {
+		writeAPIError(writer, http.StatusInternalServerError, "Web path access is not configured")
 		return
 	}
-	if request.MultipartForm != nil {
-		defer request.MultipartForm.RemoveAll()
+	requestedPath := strings.TrimSpace(request.URL.Query().Get("path"))
+	if requestedPath == "" {
+		requestedPath = app.paths.roots[0]
 	}
-	target := strings.TrimSpace(request.FormValue("to"))
-	kind := request.FormValue("kind")
-	files := request.MultipartForm.File["files"]
-	if target == "" || len(files) == 0 {
-		writeAPIError(writer, http.StatusBadRequest, "to and files are required")
-		return
-	}
-	if kind != "dir" && len(files) != 1 {
-		writeAPIError(writer, http.StatusBadRequest, "send one file per upload")
-		return
-	}
-	tempRoot, err := os.MkdirTemp("", "feiq-cli-web-upload-*")
+	resolvedPath, _, err := app.paths.Resolve(requestedPath)
 	if err != nil {
-		writeAPIError(writer, http.StatusInternalServerError, err.Error())
+		writePathAPIError(writer, err)
 		return
 	}
-	paths := request.MultipartForm.Value["paths"]
-	sendPath := ""
-	if kind == "dir" {
-		for index, header := range files {
-			relative := header.Filename
-			if index < len(paths) {
-				relative = paths[index]
-			}
-			destination, err := safeUploadPath(tempRoot, relative)
-			if err != nil {
-				_ = os.RemoveAll(tempRoot)
-				writeAPIError(writer, http.StatusBadRequest, err.Error())
-				return
-			}
-			if err := saveMultipartFile(header, destination); err != nil {
-				_ = os.RemoveAll(tempRoot)
-				writeAPIError(writer, http.StatusInternalServerError, err.Error())
-				return
-			}
-		}
-		entries, _ := os.ReadDir(tempRoot)
-		if len(entries) == 1 && entries[0].IsDir() {
-			sendPath = filepath.Join(tempRoot, entries[0].Name())
-		} else {
-			sendPath = tempRoot
-		}
-	} else {
-		sendPath = filepath.Join(tempRoot, filepath.Base(files[0].Filename))
-		if err := saveMultipartFile(files[0], sendPath); err != nil {
-			_ = os.RemoveAll(tempRoot)
-			writeAPIError(writer, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-	uploadKind := "file"
-	if kind == "dir" {
-		uploadKind = "dir"
-	}
-	operationID, err := app.startPathTransfer(target, sendPath, uploadKind, tempRoot)
+	info, err := os.Stat(resolvedPath)
 	if err != nil {
-		_ = os.RemoveAll(tempRoot)
-		writeAPIError(writer, http.StatusInternalServerError, err.Error())
+		writePathAPIError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusAccepted, map[string]string{"operation_id": operationID})
+	if !info.IsDir() {
+		writeAPIError(writer, http.StatusBadRequest, "path is not a directory")
+		return
+	}
+	listing, err := app.paths.List(resolvedPath)
+	if err != nil {
+		writePathAPIError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, listing)
+}
+
+func writePathAPIError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errPathNotAllowed):
+		writeAPIError(writer, http.StatusForbidden, err.Error())
+	case errors.Is(err, os.ErrNotExist):
+		writeAPIError(writer, http.StatusNotFound, err.Error())
+	case errors.Is(err, syscall.ENOTDIR):
+		writeAPIError(writer, http.StatusBadRequest, err.Error())
+	default:
+		writeAPIError(writer, http.StatusInternalServerError, err.Error())
+	}
 }
 
 func (app *webApp) startPathTransfer(target, path, kind, cleanupRoot string) (string, error) {
@@ -619,35 +599,6 @@ func (app *webApp) handleDownload(writer http.ResponseWriter, request *http.Requ
 func pathWithin(root, path string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-func safeUploadPath(root, relative string) (string, error) {
-	relative = filepath.Clean(filepath.FromSlash(relative))
-	if relative == "." || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("unsafe upload path")
-	}
-	return filepath.Join(root, relative), nil
-}
-
-func saveMultipartFile(header *multipart.FileHeader, destination string) error {
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return err
-	}
-	source, err := header.Open()
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-	target, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(target, source)
-	closeErr := target.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
 }
 
 func decodeJSON(request *http.Request, destination any) error {
