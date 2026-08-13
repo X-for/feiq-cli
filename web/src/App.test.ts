@@ -70,11 +70,13 @@ describe('App server path picker', () => {
 
     expect(wrapper.text()).not.toContain('＋ 文件')
     expect(wrapper.text()).not.toContain('▦ 目录')
+    expect(wrapper.get('[data-test="message-input"]').element).toBeInstanceOf(HTMLTextAreaElement)
     await wrapper.get('[data-test="open-path-picker"]').trigger('click')
     await flushPromises()
 
     expect(fetch).toHaveBeenCalledWith('/api/paths')
     expect(wrapper.find('[data-test="path-picker"]').exists()).toBe(true)
+    expect(wrapper.get('[data-test="message-input"]').element).toBeInstanceOf(HTMLTextAreaElement)
     wrapper.unmount()
   })
 

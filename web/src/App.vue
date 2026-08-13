@@ -425,6 +425,7 @@ onBeforeUnmount(() => {
         <footer class="composer">
           <textarea
             v-model="draft"
+            data-test="message-input"
             rows="1"
             placeholder="输入消息；Enter 发送，Shift+Enter 换行"
             @keydown="handleComposerKey"
