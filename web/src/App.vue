@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { formatMessageTime } from './message-time'
 import { pathBreadcrumbs, type PathEntry, type PathListing } from './path-picker'
 
 type Contact = {
@@ -237,11 +238,6 @@ function downloadURL(message: Message) {
   return `/api/download?path=${encodeURIComponent(message.saved_path || '')}`
 }
 
-function messageTime(value: string) {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
-
 function contactInitial(contact: Contact) {
   return (contact.name || contact.host || contact.ip).slice(0, 1).toUpperCase()
 }
@@ -418,7 +414,7 @@ onBeforeUnmount(() => {
                 <p>{{ message.content }}</p>
                 <a v-if="message.saved_path && message.kind === 'file'" :href="downloadURL(message)">下载文件</a>
                 <small>
-                  {{ messageTime(message.time) }}
+                  {{ formatMessageTime(message.time) }}
                   <span v-if="message.status"> · {{ message.status }}</span>
                   <span v-if="message.error" class="message-error"> · {{ message.error }}</span>
                 </small>

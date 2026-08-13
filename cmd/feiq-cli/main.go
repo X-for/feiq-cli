@@ -49,6 +49,12 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "msg":
+		err = shortMessage(os.Args[2:])
+	case "file":
+		err = shortPath(os.Args[2:], false)
+	case "dir":
+		err = shortPath(os.Args[2:], true)
 	case "send-message":
 		err = sendMessage(os.Args[2:])
 	case "send-file":
@@ -193,6 +199,9 @@ func usage() {
 
 Usage:
 	feiq-cli                                             interactive mode
+  feiq-cli msg  IP MESSAGE                            use running Web/API session
+  feiq-cli file IP FILE                               use running Web/API session
+  feiq-cli dir  IP DIRECTORY                          use running Web/API session
   feiq-cli send-message --to IP --text TEXT [options]
   feiq-cli send-file    --to IP --path FILE [options]
   feiq-cli send-dir     --to IP --path DIRECTORY [options]
@@ -201,7 +210,8 @@ Usage:
   feiq-cli api          [--listen 127.0.0.1:2426] [options]
   feiq-cli version
 
-All commands accept --bind, --port, --name, --host and --version.
+The msg, file and dir shortcuts require a running Web/API service and accept --api.
+Legacy standalone commands accept --bind, --port, --name, --host and --version.
 File and directory offers must keep running until the receiver accepts them.
 `)
 }
