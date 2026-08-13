@@ -4,6 +4,8 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,9 +21,13 @@ func TestLoadAppConfig(t *testing.T) {
 		"name": "测试端",
 		"output": "~/received",
 		"history_file": "~/.feiq-cli/custom.jsonl",
+		"web_roots": ["~/", "~/Documents"],
 		"message_wait": "8s",
 		"transfer_wait": "30m"
 	}`
+	if err := os.Mkdir(filepath.Join(home, "Documents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +54,63 @@ func TestLoadAppConfig(t *testing.T) {
 	if config.HistoryFile == nil || *config.HistoryFile != filepath.Join(home, ".feiq-cli", "custom.jsonl") {
 		t.Fatalf("history file = %#v", config.HistoryFile)
 	}
+	if want := []string{"~/", "~/Documents"}; !reflect.DeepEqual(config.WebRoots, want) {
+		t.Fatalf("web roots = %q, want %q", config.WebRoots, want)
+	}
 	if got := configDuration(config.MessageWait, time.Second); got != 8*time.Second {
 		t.Fatalf("message wait = %s", got)
 	}
 	if got := configDuration(config.TransferWait, time.Second); got != 30*time.Minute {
 		t.Fatalf("transfer wait = %s", got)
+	}
+}
+
+func TestConfiguredWebRootsDefaultToHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := configuredWebRoots(appConfig{})
+	if err != nil || !reflect.DeepEqual(got, []string{home}) {
+		t.Fatalf("roots = %q, err = %v", got, err)
+	}
+}
+
+func TestConfiguredWebRootsExpandAndCompact(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	child := filepath.Join(home, "Documents")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	config := appConfig{WebRoots: []string{"~/", "~/Documents", "~/"}}
+	got, err := configuredWebRoots(config)
+	if err != nil || !reflect.DeepEqual(got, []string{home}) {
+		t.Fatalf("roots = %q, err = %v", got, err)
+	}
+}
+
+func TestConfiguredWebRootsAllowFilesystemRoot(t *testing.T) {
+	got, err := configuredWebRoots(appConfig{WebRoots: []string{"/"}})
+	if err != nil || !reflect.DeepEqual(got, []string{string(filepath.Separator)}) {
+		t.Fatalf("roots = %q, err = %v", got, err)
+	}
+}
+
+func TestLoadAppConfigRejectsFileWebRoot(t *testing.T) {
+	rootFile := filepath.Join(t.TempDir(), "regular-file")
+	if err := os.WriteFile(rootFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"web_roots":[` + strconv.Quote(rootFile) + `]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := loadAppConfig([]string{"--config", path})
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("error = %v, want not a directory", err)
 	}
 }
 
@@ -76,7 +134,7 @@ func TestLoadAppConfigAllowsMissingDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config != (appConfig{}) {
+	if !reflect.DeepEqual(config, appConfig{}) {
 		t.Fatalf("config = %#v", config)
 	}
 	if want := filepath.Join(home, ".feiq-cli", "config.json"); path != want {

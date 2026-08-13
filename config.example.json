@@ -6,6 +6,7 @@
   "version": "1",
   "output": "~/Downloads/飞秋接收",
   "history_file": "~/.feiq-cli/history.jsonl",
+  "web_roots": ["~/"],
   "color": "auto",
   "message_wait": "5s",
   "transfer_wait": "5m"

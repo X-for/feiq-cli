@@ -13,16 +13,17 @@ import (
 )
 
 type appConfig struct {
-	Bind         *string `json:"bind"`
-	Port         *int    `json:"port"`
-	Name         *string `json:"name"`
-	Host         *string `json:"host"`
-	Version      *string `json:"version"`
-	Output       *string `json:"output"`
-	HistoryFile  *string `json:"history_file"`
-	Color        *string `json:"color"`
-	MessageWait  *string `json:"message_wait"`
-	TransferWait *string `json:"transfer_wait"`
+	Bind         *string  `json:"bind"`
+	Port         *int     `json:"port"`
+	Name         *string  `json:"name"`
+	Host         *string  `json:"host"`
+	Version      *string  `json:"version"`
+	Output       *string  `json:"output"`
+	HistoryFile  *string  `json:"history_file"`
+	WebRoots     []string `json:"web_roots"`
+	Color        *string  `json:"color"`
+	MessageWait  *string  `json:"message_wait"`
+	TransferWait *string  `json:"transfer_wait"`
 }
 
 func loadAppConfig(args []string) (appConfig, string, error) {
@@ -137,7 +138,73 @@ func (config appConfig) validate() error {
 			return err
 		}
 	}
+	if len(config.WebRoots) > 0 {
+		if _, err := configuredWebRoots(config); err != nil {
+			return fmt.Errorf("web_roots: %w", err)
+		}
+	}
 	return nil
+}
+
+func configuredWebRoots(config appConfig) ([]string, error) {
+	roots := config.WebRoots
+	if len(roots) == 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("find home directory for web_roots: %w", err)
+		}
+		roots = []string{home}
+	}
+
+	canonicalRoots := make([]string, 0, len(roots))
+	seen := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		expanded := expandHomePath(root)
+		absolute, err := filepath.Abs(expanded)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %q: %w", root, err)
+		}
+		canonical, err := filepath.EvalSymlinks(absolute)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %q: %w", root, err)
+		}
+		info, err := os.Stat(canonical)
+		if err != nil {
+			return nil, fmt.Errorf("stat %q: %w", root, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("%q is not a directory", root)
+		}
+		canonical = filepath.Clean(canonical)
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		canonicalRoots = append(canonicalRoots, canonical)
+	}
+
+	compacted := make([]string, 0, len(canonicalRoots))
+	for index, root := range canonicalRoots {
+		contained := false
+		for otherIndex, other := range canonicalRoots {
+			if index != otherIndex && webRootContains(other, root) {
+				contained = true
+				break
+			}
+		}
+		if !contained {
+			compacted = append(compacted, root)
+		}
+	}
+	return compacted, nil
+}
+
+func webRootContains(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (config *appConfig) expandPaths() {
