@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { pathBreadcrumbs, type PathEntry, type PathListing } from './path-picker'
 
 type Contact = {
   ip: string
@@ -43,13 +44,12 @@ const sending = ref(false)
 const connected = ref(false)
 const notice = ref('')
 const showPathPanel = ref(false)
-const serverPath = ref('')
+const pathListing = ref<PathListing | null>(null)
+const pathLoading = ref(false)
+const selectedPath = ref<PathEntry | null>(null)
+const manualPath = ref('')
 const serverPathKind = ref<'file' | 'dir'>('file')
-const pendingFiles = ref<File[]>([])
-const pendingKind = ref<'file' | 'dir'>('file')
 const messageList = ref<HTMLElement | null>(null)
-const fileInput = ref<HTMLInputElement | null>(null)
-const directoryInput = ref<HTMLInputElement | null>(null)
 let events: EventSource | null = null
 let refreshTimer: number | undefined
 
@@ -62,9 +62,12 @@ const filteredContacts = computed(() => {
 })
 
 const currentTitle = computed(() => current.value?.name || current.value?.host || current.value?.ip || '')
+const breadcrumbs = computed(() => pathListing.value
+  ? pathBreadcrumbs(pathListing.value.root, pathListing.value.path)
+  : [])
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, options)
+  const response = options ? await fetch(path, options) : await fetch(path)
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`)
   return body as T
@@ -127,55 +130,67 @@ function handleComposerKey(event: KeyboardEvent) {
   }
 }
 
-function chooseFiles(kind: 'file' | 'dir') {
-  if (!current.value) return showNotice('请先选择联系人')
-  if (kind === 'file') fileInput.value?.click()
-  else directoryInput.value?.click()
-}
-
-function selectedFiles(event: Event, kind: 'file' | 'dir') {
-  const input = event.target as HTMLInputElement
-  pendingFiles.value = Array.from(input.files || [])
-  pendingKind.value = kind
-  input.value = ''
-}
-
-function handlePaste(event: ClipboardEvent) {
-  const images = Array.from(event.clipboardData?.files || []).filter((file) => file.type.startsWith('image/'))
-  if (!images.length) return
-  event.preventDefault()
-  pendingFiles.value = images.slice(0, 1)
-  pendingKind.value = 'file'
-}
-
-async function uploadPending() {
-  if (!current.value || !pendingFiles.value.length) return
-  const form = new FormData()
-  form.append('to', current.value.ip)
-  form.append('kind', pendingKind.value)
-  for (const file of pendingFiles.value) {
-    form.append('files', file, file.name)
-    form.append('paths', (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name)
-  }
-  const files = pendingFiles.value
-  pendingFiles.value = []
+async function loadPaths(path = '') {
+  pathLoading.value = true
+  selectedPath.value = null
   try {
-    await api('/api/upload', { method: 'POST', body: form })
+    const query = path ? `?path=${encodeURIComponent(path)}` : ''
+    pathListing.value = await api<PathListing>(`/api/paths${query}`)
+    manualPath.value = pathListing.value.path
   } catch (error) {
-    pendingFiles.value = files
     showNotice(error)
+  } finally {
+    pathLoading.value = false
+  }
+}
+
+async function togglePathPicker() {
+  if (showPathPanel.value) {
+    showPathPanel.value = false
+    return
+  }
+  showPathPanel.value = true
+  await loadPaths()
+}
+
+function selectPath(entry: PathEntry) {
+  selectedPath.value = entry
+  manualPath.value = entry.path
+  serverPathKind.value = entry.kind
+}
+
+function selectCurrentDirectory() {
+  if (!pathListing.value) return
+  selectPath({
+    name: pathListing.value.path.split('/').filter(Boolean).at(-1) || '/',
+    path: pathListing.value.path,
+    kind: 'dir',
+    size: 0,
+  })
+}
+
+function selectManualPath() {
+  const path = manualPath.value.trim()
+  if (!path) return showNotice('请输入路径')
+  selectedPath.value = {
+    name: path.split('/').filter(Boolean).at(-1) || path,
+    path,
+    kind: serverPathKind.value,
+    size: 0,
   }
 }
 
 async function sendServerPath() {
-  if (!current.value || !serverPath.value.trim()) return
+  if (!current.value || !selectedPath.value) return
+  const selection = selectedPath.value
   try {
     await api('/api/send-path', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: current.value.ip, path: serverPath.value, kind: serverPathKind.value }),
+      body: JSON.stringify({ to: current.value.ip, path: selection.path, kind: selection.kind }),
     })
-    serverPath.value = ''
+    selectedPath.value = null
+    manualPath.value = ''
     showPathPanel.value = false
   } catch (error) {
     showNotice(error)
@@ -300,17 +315,84 @@ onBeforeUnmount(() => {
             <h2>{{ currentTitle }}</h2>
             <p>{{ current.ip }} · {{ current.online ? '在线' : '本地历史联系人' }}</p>
           </div>
-          <button class="header-action" @click="showPathPanel = !showPathPanel">发送本机路径</button>
+          <button class="header-action" data-test="open-path-picker" @click="togglePathPicker">选择本机路径</button>
         </header>
 
-        <div v-if="showPathPanel" class="path-panel">
-          <select v-model="serverPathKind" aria-label="路径类型">
-            <option value="file">文件</option>
-            <option value="dir">目录</option>
-          </select>
-          <input v-model="serverPath" placeholder="~/Desktop/example" @keyup.enter="sendServerPath" />
-          <button @click="sendServerPath">发送</button>
-        </div>
+        <section v-if="showPathPanel" class="path-picker" data-test="path-picker" aria-label="服务端路径选择器">
+          <div class="path-toolbar">
+            <label>
+              <span>允许目录</span>
+              <select
+                :value="pathListing?.root || ''"
+                aria-label="允许目录"
+                data-test="path-root"
+                :disabled="pathLoading"
+                @change="loadPaths(($event.target as HTMLSelectElement).value)"
+              >
+                <option v-for="root in pathListing?.roots || []" :key="root" :value="root">{{ root }}</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              class="ghost-button"
+              data-test="path-parent"
+              :disabled="!pathListing?.parent || pathLoading"
+              @click="pathListing?.parent && loadPaths(pathListing.parent)"
+            >上一级</button>
+            <button type="button" class="ghost-button" :disabled="!pathListing || pathLoading" @click="selectCurrentDirectory">选择当前目录</button>
+          </div>
+
+          <nav v-if="breadcrumbs.length" class="path-breadcrumbs" aria-label="当前路径">
+            <template v-for="(crumb, index) in breadcrumbs" :key="crumb.path">
+              <span v-if="index" aria-hidden="true">/</span>
+              <button type="button" :disabled="pathLoading" @click="loadPaths(crumb.path)">{{ crumb.label }}</button>
+            </template>
+          </nav>
+
+          <div class="path-manual">
+            <select v-model="serverPathKind" aria-label="手动路径类型">
+              <option value="file">文件</option>
+              <option value="dir">目录</option>
+            </select>
+            <input v-model="manualPath" aria-label="手动路径" placeholder="~/Desktop/example" @keyup.enter="selectManualPath" />
+            <button type="button" class="ghost-button" @click="loadPaths(manualPath)">定位目录</button>
+            <button type="button" class="ghost-button" data-test="select-manual-path" @click="selectManualPath">选择路径</button>
+          </div>
+
+          <div class="path-list" aria-live="polite">
+            <p v-if="pathLoading" class="path-state">正在读取目录…</p>
+            <p v-else-if="pathListing && !pathListing.entries.length" class="path-state">此目录为空</p>
+            <div
+              v-for="entry in pathListing?.entries || []"
+              v-else
+              :key="entry.path"
+              class="path-entry"
+              :class="{ selected: selectedPath?.path === entry.path }"
+            >
+              <button
+                type="button"
+                class="path-entry-select"
+                :data-test="`path-entry-${entry.kind}`"
+                @click="selectPath(entry)"
+                @dblclick="entry.kind === 'dir' && loadPaths(entry.path)"
+              >
+                <span class="path-entry-icon">{{ entry.kind === 'dir' ? '▦' : '▤' }}</span>
+                <span class="path-entry-name">{{ entry.name }}</span>
+                <small>{{ entry.kind === 'dir' ? '目录' : `${entry.size} B` }}</small>
+              </button>
+              <button v-if="entry.kind === 'dir'" type="button" class="path-open" @click="loadPaths(entry.path)">打开</button>
+            </div>
+          </div>
+
+          <div class="path-picker-actions">
+            <p>
+              <span>已选择</span>
+              <strong>{{ selectedPath?.path || '尚未选择文件或目录' }}</strong>
+            </p>
+            <button type="button" class="ghost-button" @click="showPathPanel = false">取消</button>
+            <button type="button" data-test="send-selected-path" :disabled="!selectedPath || pathLoading" @click="sendServerPath">发送</button>
+          </div>
+        </section>
 
         <div ref="messageList" class="message-list">
           <div v-if="loadingHistory" class="conversation-placeholder">正在读取聊天记录…</div>
@@ -340,30 +422,14 @@ onBeforeUnmount(() => {
           </article>
         </div>
 
-        <div v-if="pendingFiles.length" class="pending-upload">
-          <div>
-            <strong>{{ pendingKind === 'dir' ? '待发送目录' : '待发送文件' }}</strong>
-            <span>{{ pendingFiles.length === 1 ? pendingFiles[0].name : `${pendingFiles.length} 个文件` }}</span>
-          </div>
-          <button class="ghost-button" @click="pendingFiles = []">取消</button>
-          <button @click="uploadPending">发送</button>
-        </div>
-
         <footer class="composer">
-          <div class="composer-actions">
-            <button title="选择文件" @click="chooseFiles('file')">＋ 文件</button>
-            <button title="选择目录" @click="chooseFiles('dir')">▦ 目录</button>
-          </div>
           <textarea
             v-model="draft"
             rows="1"
-            placeholder="输入消息；Enter 发送，Shift+Enter 换行，也可以粘贴图片"
+            placeholder="输入消息；Enter 发送，Shift+Enter 换行"
             @keydown="handleComposerKey"
-            @paste="handlePaste"
           ></textarea>
           <button class="send-button" :disabled="!draft.trim() || sending" @click="sendMessage">发送</button>
-          <input ref="fileInput" class="hidden-input" type="file" @change="selectedFiles($event, 'file')" />
-          <input ref="directoryInput" class="hidden-input" type="file" webkitdirectory multiple @change="selectedFiles($event, 'dir')" />
         </footer>
       </template>
 
