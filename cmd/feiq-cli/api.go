@@ -22,9 +22,11 @@ import (
 	"syscall"
 	"time"
 
+	"feiq-cli/internal/console"
 	"feiq-cli/internal/history"
 	"feiq-cli/ipmsg"
 	webassets "feiq-cli/web"
+	"golang.org/x/term"
 )
 
 type webSession interface {
@@ -130,6 +132,8 @@ func httpMode(args []string, frontend http.Handler) error {
 	historyPath := flags.String("history-file", configString(config.HistoryFile, history.DefaultPath()), "local JSONL chat history file")
 	messageWait := flags.Duration("message-wait", configDuration(config.MessageWait, 5*time.Second), "message acknowledgement timeout")
 	transferWait := flags.Duration("transfer-wait", configDuration(config.TransferWait, 5*time.Minute), "attachment offer timeout")
+	noCLI := flags.Bool("no-cli", false, "disable the interactive terminal while the Web UI is running")
+	colorMode := flags.String("color", configString(config.Color, "auto"), "terminal colors: auto, always or never")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -151,6 +155,19 @@ func httpMode(args []string, frontend http.Handler) error {
 	if err != nil {
 		return err
 	}
+	var terminal *console.Terminal
+	if frontend != nil && !*noCLI && term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		terminal, err = console.New(os.Stdin, os.Stdout, "feiq> ")
+		if err != nil {
+			return fmt.Errorf("start interactive terminal: %w", err)
+		}
+		if err := terminal.SetColorMode(*colorMode); err != nil {
+			_ = terminal.Close()
+			return err
+		}
+		terminal.SetCommands(interactiveCommands)
+		defer terminal.Close()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -167,8 +184,14 @@ func httpMode(args []string, frontend http.Handler) error {
 	}
 	session, err := common.node().StartSession(ctx, absOutput, func(event ipmsg.ReceiveEvent) {
 		app.receive(event)
+		if terminal != nil {
+			printReceiveEvent(terminal, event)
+		}
 	}, func(err error) {
 		hub.publish(webEvent{Type: "error", Error: err.Error()})
+		if terminal != nil {
+			terminal.PrintfColor(console.ColorRed, "[%s] [错误] %v", clock(), err)
+		}
 	})
 	if err != nil {
 		return err
@@ -195,6 +218,16 @@ func httpMode(args []string, frontend http.Handler) error {
 
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- server.Serve(listener) }()
+	cliErrors := make(chan error, 1)
+	if terminal != nil {
+		localUsers, err := store.SearchUsers("")
+		if err != nil {
+			return err
+		}
+		go func() {
+			cliErrors <- runInteractiveSession(ctx, terminal, session, store, localUsers, common.bind, common.port, absOutput, *messageWait, *transferWait)
+		}()
+	}
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -205,6 +238,15 @@ func httpMode(args []string, frontend http.Handler) error {
 			return nil
 		}
 		return err
+	case err := <-cliErrors:
+		stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdownErr := server.Shutdown(shutdownCtx)
+		if err != nil {
+			return err
+		}
+		return shutdownErr
 	}
 }
 

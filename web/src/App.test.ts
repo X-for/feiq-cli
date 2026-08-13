@@ -65,6 +65,22 @@ describe('App server path picker', () => {
     return wrapper
   }
 
+  it('keeps cached contacts available when discovery fails', async () => {
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/discover') return response({ error: 'broadcast unavailable' }, 500)
+      if (url === '/api/contacts') return response([contact])
+      return response({ error: 'unexpected request' }, 404)
+    })
+
+    const wrapper = mount(App)
+    await flushPromises()
+
+    expect(wrapper.find('.contact-card').exists()).toBe(true)
+    expect(wrapper.text()).toContain('AQ')
+    wrapper.unmount()
+  })
+
   it('removes browser upload controls and opens the server picker', async () => {
     const wrapper = await mountConversation()
 

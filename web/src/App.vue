@@ -74,11 +74,15 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 async function refreshContacts(discover = false) {
-  try {
-    if (discover) {
+  if (discover) {
+    try {
       await api('/api/discover', { method: 'POST' })
       await new Promise((resolve) => window.setTimeout(resolve, 350))
+    } catch (error) {
+      showNotice(error)
     }
+  }
+  try {
     const fresh = await api<Contact[]>('/api/contacts')
     const unread = new Map(contacts.value.map((item) => [item.ip, item.unread || 0]))
     contacts.value = fresh.map((item) => ({ ...item, unread: unread.get(item.ip) || 0 }))

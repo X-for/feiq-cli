@@ -78,7 +78,6 @@ func interactive(args []string) error {
 	}
 	terminal.SetCommands(interactiveCommands)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	var sendWG sync.WaitGroup
 	session, err := common.node().StartSession(
 		ctx,
 		*output,
@@ -95,24 +94,41 @@ func interactive(args []string) error {
 		_ = terminal.Close()
 		return err
 	}
+	defer func() {
+		cancel()
+		session.Close()
+		_ = terminal.Close()
+	}()
+	return runInteractiveSession(ctx, terminal, session, historyStore, localUsers, common.bind, common.port, *output, *messageWait, *transferWait)
+}
+
+func runInteractiveSession(
+	ctx context.Context,
+	terminal *console.Terminal,
+	session *ipmsg.Session,
+	historyStore *history.Store,
+	localUsers []history.User,
+	bind string,
+	port int,
+	output string,
+	messageWait time.Duration,
+	transferWait time.Duration,
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	var sendWG sync.WaitGroup
+	defer sendWG.Wait()
+	defer cancel()
 	contacts := contactBook{session: session, local: localUsers}
 	terminal.SetCompleter(func(line string) []console.Completion {
 		return interactiveCompletions(line, contacts.search)
 	})
-	defer func() {
-		cancel()
-		session.Close()
-		sendWG.Wait()
-		_ = terminal.Close()
-	}()
-
 	sendText := func(target, text string) {
 		appendHistory(terminal, historyStore, history.Entry{Direction: "out", PeerIP: target, Kind: "msg", Content: text})
 		terminal.PrintfColor(console.ColorCyan, "[%s] [我 -> %s] 消息: %s", clock(), target, text)
 		sendWG.Add(1)
 		go func() {
 			defer sendWG.Done()
-			sendCtx, stop := context.WithTimeout(ctx, *messageWait)
+			sendCtx, stop := context.WithTimeout(ctx, messageWait)
 			defer stop()
 			acked, err := session.SendMessage(sendCtx, target, text)
 			if err != nil {
@@ -135,7 +151,7 @@ func interactive(args []string) error {
 		sendWG.Add(1)
 		go func() {
 			defer sendWG.Done()
-			sendCtx, stop := context.WithTimeout(ctx, *transferWait)
+			sendCtx, stop := context.WithTimeout(ctx, transferWait)
 			defer stop()
 			if err := session.SendPath(sendCtx, target, path); err != nil {
 				terminal.PrintfColor(console.ColorRed, "[%s] [%s发送失败 -> %s] %v", clock(), label, target, err)
@@ -164,7 +180,7 @@ func interactive(args []string) error {
 		go func() {
 			defer sendWG.Done()
 			defer os.Remove(imagePath)
-			sendCtx, stop := context.WithTimeout(ctx, *transferWait)
+			sendCtx, stop := context.WithTimeout(ctx, transferWait)
 			defer stop()
 			if err := session.SendPath(sendCtx, target, imagePath); err != nil {
 				terminal.PrintfColor(console.ColorRed, "[%s] [图片发送失败 -> %s] %v", clock(), target, err)
@@ -196,7 +212,7 @@ func interactive(args []string) error {
 		return false
 	}
 
-	terminal.PrintfColor(console.ColorBlue, "[%s] feiq-cli 已启动，监听 %s:%d，附件保存到 %s", clock(), common.bind, common.port, *output)
+	terminal.PrintfColor(console.ColorBlue, "[%s] feiq-cli 已启动，监听 %s:%d，附件保存到 %s", clock(), bind, port, output)
 	terminal.PrintfColor(console.ColorGray, "聊天记录保存到 %s", historyStore.Path())
 	terminal.PrintfColor(console.ColorBlue, "使用 /to <用户名或 IP> 选择联系人；输入 /help 查看帮助")
 	for {
