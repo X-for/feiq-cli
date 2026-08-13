@@ -94,6 +94,7 @@ cp config.example.json ~/.feiq-cli/config.json
   "port": 2425,
   "output": "~/Downloads/飞秋接收",
   "history_file": "~/.feiq-cli/history.jsonl",
+  "web_roots": ["~/", "/Volumes/data"],
   "name": "CLI 客户端",
   "host": "feiq-cli",
   "version": "1",
@@ -114,13 +115,24 @@ cp config.example.json ~/.feiq-cli/config.json
 | `version` | `1` | 所有运行模式的 IP Messenger 版本字段 |
 | `output` | `./downloads` | 交互模式和 `receive` 自动接收文件、目录的保存路径 |
 | `history_file` | `~/.feiq-cli/history.jsonl` | 交互模式的本地聊天记录路径 |
+| `web_roots` | 当前用户的 `$HOME` | Web 页面可以浏览并发送的本机目录列表 |
 | `color` | `auto` | 交互模式颜色，可设为 `auto`、`always` 或 `never` |
 | `message_wait` | 交互模式 `5s`；`send-message` 为 `3s` | 消息回执等待时间 |
 | `transfer_wait` | `5m` | 交互模式、`send-file` 和 `send-dir` 的附件等待接收时间 |
 
 `message_wait` 和 `transfer_wait` 使用 Go 时间格式且必须大于零，例如 `500ms`、`5s`、`30m` 或 `1h`。
 
-配置中的 `output`、`history_file` 以及 `--config` 路径支持以 `~/` 开头。其他相对路径以启动程序时的当前工作目录为基准。
+配置中的 `output`、`history_file`、`web_roots` 以及 `--config` 路径支持以 `~/` 开头。其他相对路径以启动程序时的当前工作目录为基准。`web_roots` 中的路径必须是已存在的目录；可以配置多个目录，重复或被更宽目录包含的项会自动合并。
+
+默认情况下，Web 页面只能浏览当前用户的 `$HOME`。如果确实需要浏览整台电脑，可以明确配置：
+
+```json
+{
+  "web_roots": ["/"]
+}
+```
+
+配置 `/` 会允许 Web 操作者选择本机文件系统中的任意可读文件或目录。与 `--allow-remote` 同时使用时，局域网中能访问 Web 端口的设备也会获得该能力，请谨慎启用。
 
 所有命令均可使用其他配置文件：
 
@@ -305,7 +317,9 @@ macOS 下可以先复制一张截图或图片，再执行 `/image`。程序会�
 ./feiq-cli web
 ```
 
-浏览器访问 `http://127.0.0.1:2426`。Web 界面支持联系人发现与搜索、历史记录、实时消息、文件和目录收发、粘贴图片以及附件下载。
+浏览器访问 `http://127.0.0.1:2426`。Web 界面支持联系人发现与搜索、历史记录、实时消息、服务端本机路径选择、文件和目录收发以及已接收附件下载。
+
+发送文件或目录时，点击聊天标题栏的“选择本机路径”。选择器默认从当前用户的 `$HOME` 开始，支持允许目录切换、面包屑导航、进入子目录、选择当前目录和手动输入路径。浏览和手动输入都会由服务端按 `web_roots` 重新校验，不能通过 `..` 或符号链接访问未授权目录。
 
 默认只允许本机访问。需要让局域网内其他设备打开页面时，必须明确启用：
 
@@ -314,7 +328,7 @@ macOS 下可以先复制一张截图或图片，再执行 `/image`。程序会�
 ./feiq-cli web --listen 0.0.0.0:2426 --allow-remote
 ```
 
-Web 服务尚无身份认证，启用远程访问后，同一网络中能访问该端口的设备可以操作本机发送消息和附件，因此只应在受信任局域网中使用。
+Web 服务尚无身份认证，启用远程访问后，同一网络中能访问该端口的设备可以操作本机发送消息，并浏览、发送 `web_roots` 内的文件和目录，因此只应在受信任局域网中使用。
 
 ### Web UI 二次开发
 
