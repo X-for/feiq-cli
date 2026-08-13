@@ -63,6 +63,15 @@ Web 页面已经作为静态资源嵌入 Go 二进制，因此编译后不需要
 go install ./cmd/feiq-cli
 ```
 
+安装后请确认 Go 的二进制目录已经加入 `PATH`：
+
+```bash
+command -v feiq-cli
+feiq-cli version
+```
+
+下文使用 `./feiq-cli` 表示仓库根目录构建出的程序；通过 `go install` 安装后，可以直接将它替换为 `feiq-cli`。
+
 ## 配置文件
 
 程序启动时默认尝试读取：
@@ -459,11 +468,37 @@ example-2.txt
 ## 端口与运行限制
 
 - 默认同时使用 UDP 2425 和 TCP 2425。
-- 交互模式在一个进程中共享 UDP/TCP 监听，可以同时收发。
-- 独立命令之间不能同时占用相同监听地址和端口。
+- Web/API 默认监听本机 TCP 2426；它不替代 IP Messenger 使用的 UDP/TCP 2425。
+- 交互模式和 `web` 模式在一个进程中共享 UDP/TCP 监听，可以同时收发。
+- 同一地址上的 UDP/TCP 2425 只能由一个常驻 IP Messenger 会话占用。`feiq-cli web` 已经运行时，不要再启动第二个交互模式或 `receive`。
+- `feiq-cli msg/file/dir` 是 HTTP 客户端，只调用当前运行的 Web/API，不会再次监听 2425。
 - 如果桌面版飞秋正在监听 2425，请先退出桌面版飞秋。
 - 使用自定义端口时，通信双方必须使用相同端口。
 - 防火墙必须允许 UDP/TCP 2425 入站和出站通信。
+
+遇到 `address already in use` 时，可以分别查看占用 2425、Web 端口 2426 或自定义测试端口的进程：
+
+```bash
+lsof -nP -iTCP:2425 -iUDP:2425
+lsof -nP -iTCP:2426
+lsof -nP -iTCP:2525 -iUDP:2525
+```
+
+输出中的 `PID` 是占用端口的进程号。先用只读命令确认它的程序文件、工作目录和全部监听端口：
+
+```bash
+lsof -nP -a -p <PID> -d cwd,txt
+lsof -nP -a -p <PID> -iTCP -iUDP
+```
+
+确认是自己遗留的测试进程后，再正常终止并复查端口；不要直接结束来源不明的进程：
+
+```bash
+kill <PID>
+lsof -nP -iTCP:2525 -iUDP:2525
+```
+
+`2525` 不是程序默认端口，只会在显式传入 `--port 2525` 时使用。它通常用于本机隔离测试；使用该端口的实例不能与仍使用 2425 的飞秋设备直接通信。
 
 ## 当前支持范围
 
@@ -484,6 +519,10 @@ example-2.txt
 - 命令、联系人、文件与目录路径 Tab 补全
 - 当前联系人会话和多行消息编辑
 - macOS 剪贴板图片转普通 PNG 文件发送
+- 单进程 Web UI、HTTP API 和终端交互模式
+- 通过运行中 Web/API 会话执行 `msg`、`file`、`dir` Shell 短命令
+- Web 服务端路径选择与 `web_roots` 访问控制
+- Web 历史记录按本机时区显示完整年月日和时分
 
 暂未支持：
 
