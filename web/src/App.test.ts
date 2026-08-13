@@ -77,6 +77,10 @@ describe('App server path picker', () => {
     expect(fetch).toHaveBeenCalledWith('/api/paths')
     expect(wrapper.find('[data-test="path-picker"]').exists()).toBe(true)
     expect(wrapper.get('[data-test="message-input"]').element).toBeInstanceOf(HTMLTextAreaElement)
+    expect(wrapper.get('[data-test="path-picker"]').element.parentElement).toBe(
+      wrapper.get('[data-test="chat-body"]').element,
+    )
+    expect(wrapper.get('[data-test="message-input"]').element.closest('.chat-body')).toBeNull()
     wrapper.unmount()
   })
 

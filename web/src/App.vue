@@ -318,6 +318,7 @@ onBeforeUnmount(() => {
           <button class="header-action" data-test="open-path-picker" @click="togglePathPicker">选择本机路径</button>
         </header>
 
+        <div class="chat-body" data-test="chat-body">
         <section v-if="showPathPanel" class="path-picker" data-test="path-picker" aria-label="服务端路径选择器">
           <div class="path-toolbar">
             <label>
@@ -420,6 +421,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </article>
+        </div>
         </div>
 
         <footer class="composer">
