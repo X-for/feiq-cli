@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -267,27 +268,35 @@ func TestDownloadAttachmentRetriesEmptyTransfer(t *testing.T) {
 	}
 }
 
-func TestDownloadFileRemovesPartialOutput(t *testing.T) {
+func TestDownloadFileResumesFromPartialOffset(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
+	offsets := make(chan int64, 2)
 	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
+		for _, content := range []string{"short", "12345"} {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			request, err := readTransferRequest(conn)
+			if err != nil {
+				_ = conn.Close()
+				return
+			}
+			offsets <- request.offset
+			_, _ = io.WriteString(conn, content)
+			_ = conn.Close()
 		}
-		defer conn.Close()
-		_, _ = bufio.NewReader(conn).ReadBytes(0)
-		_, _ = io.WriteString(conn, "short")
 	}()
 
 	output := t.TempDir()
 	node := testNode("127.0.0.1", testPort(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err = node.downloadAttachment(
+	saved, err := node.downloadAttachment(
 		ctx,
 		"127.0.0.1",
 		listener.Addr().(*net.TCPAddr).Port,
@@ -295,11 +304,131 @@ func TestDownloadFileRemovesPartialOutput(t *testing.T) {
 		Attachment{FileID: 0xb, Name: "partial.bin", Size: 10, Attr: FileRegular},
 		output,
 	)
-	if err == nil {
-		t.Fatal("expected a short download error")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, statErr := os.Stat(filepath.Join(output, "partial.bin")); !os.IsNotExist(statErr) {
-		t.Fatalf("partial file was not removed: %v", statErr)
+	if data, err := os.ReadFile(saved); err != nil || string(data) != "short12345" {
+		t.Fatalf("saved data = %q, err = %v", data, err)
+	}
+	if first, second := <-offsets, <-offsets; first != 0 || second != 5 {
+		t.Fatalf("requested offsets = %d, %d; want 0, 5", first, second)
+	}
+}
+
+func TestDownloadFileResumesExistingPartialAfterRestart(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	attachment := Attachment{FileID: 0xb, Name: "restart.bin", Size: 10, ModTime: 123, Attr: FileRegular}
+	output := t.TempDir()
+	partial, err := attachmentPartialPath(output, "127.0.0.1", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partial, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	offset := make(chan int64, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		request, err := readTransferRequest(conn)
+		if err != nil {
+			return
+		}
+		offset <- request.offset
+		_, _ = io.WriteString(conn, "12345")
+	}()
+
+	node := testNode("127.0.0.1", testPort(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	saved, err := node.downloadAttachment(ctx, "127.0.0.1", listener.Addr().(*net.TCPAddr).Port, 0x2a, attachment, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := <-offset; got != 5 {
+		t.Fatalf("requested offset = %d, want 5", got)
+	}
+	if data, err := os.ReadFile(saved); err != nil || string(data) != "short12345" {
+		t.Fatalf("saved data = %q, err = %v", data, err)
+	}
+}
+
+func TestDownloadFileKeepsPartialWhenRetriesFail(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	senderPort := listener.Addr().(*net.TCPAddr).Port
+	attachment := Attachment{FileID: 0xb, Name: "keep.bin", Size: 10, ModTime: 456, Attr: FileRegular}
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = readTransferRequest(conn)
+		_, _ = io.WriteString(conn, "short")
+		_ = conn.Close()
+		_ = listener.Close()
+	}()
+
+	output := t.TempDir()
+	node := testNode("127.0.0.1", testPort(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := node.downloadAttachment(ctx, "127.0.0.1", senderPort, 0x2a, attachment, output); err == nil {
+		t.Fatal("expected interrupted download error")
+	}
+	partial, err := attachmentPartialPath(output, "127.0.0.1", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(partial); err != nil || string(data) != "short" {
+		t.Fatalf("partial data = %q, err = %v", data, err)
+	}
+}
+
+func TestDownloadFileRejectsSymlinkPartial(t *testing.T) {
+	output := t.TempDir()
+	attachment := Attachment{FileID: 0xb, Name: "safe.bin", Size: 10, ModTime: 789, Attr: FileRegular}
+	partial, err := attachmentPartialPath(output, "127.0.0.1", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, partial); err != nil {
+		t.Fatal(err)
+	}
+	node := testNode("127.0.0.1", testPort(t))
+	_, err = node.downloadAttachmentAttempt(context.Background(), "127.0.0.1", 1, 0x2a, attachment, output, partial)
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("err = %v", err)
+	}
+	if data, err := os.ReadFile(victim); err != nil || string(data) != "unchanged" {
+		t.Fatalf("victim data = %q, err = %v", data, err)
+	}
+}
+
+func TestSendTransferDataRejectsOffsetBeyondFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "small.bin")
+	if err := os.WriteFile(path, []byte("small"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	err := sendTransferData(server, transferRequest{command: CmdGetFileData, offset: 6}, path, false)
+	if err == nil || !strings.Contains(err.Error(), "outside file size") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

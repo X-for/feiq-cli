@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -150,19 +151,40 @@ func (n *Node) SendPath(ctx context.Context, target, path string) error {
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
-	conn, err := listener.Accept()
-	if err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("waiting for receiver request: %w", ctx.Err())
+	tcpListener := listener.(*net.TCPListener)
+	completed := false
+	for {
+		if completed {
+			_ = tcpListener.SetDeadline(time.Now().Add(750 * time.Millisecond))
+		}
+		conn, err := listener.Accept()
+		if err != nil {
+			if completed && isTimeout(err) {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return fmt.Errorf("waiting for receiver request: %w", ctx.Err())
+			}
+			return err
+		}
+		_ = tcpListener.SetDeadline(time.Time{})
+		remote, ok := conn.RemoteAddr().(*net.TCPAddr)
+		if !ok || !remote.IP.Equal(targetAddr.IP) {
+			_ = conn.Close()
+			return fmt.Errorf("rejected transfer request from unexpected peer %s", conn.RemoteAddr())
+		}
+		err = n.servePathRequest(conn, packetNo, attachment.FileID, path, info.IsDir())
+		_ = conn.Close()
+		if err == nil {
+			completed = true
+			continue
+		}
+		if errors.Is(err, errTransferInterrupted) {
+			completed = false
+			continue
 		}
 		return err
 	}
-	defer conn.Close()
-	remote, ok := conn.RemoteAddr().(*net.TCPAddr)
-	if !ok || !remote.IP.Equal(targetAddr.IP) {
-		return fmt.Errorf("rejected transfer request from unexpected peer %s", conn.RemoteAddr())
-	}
-	return n.servePathRequest(conn, packetNo, attachment.FileID, path, info.IsDir())
 }
 
 func (n *Node) servePathRequest(conn net.Conn, packetNo, fileID uint64, path string, directory bool) error {
@@ -248,12 +270,23 @@ func sendTransferData(conn net.Conn, request transferRequest, path string, direc
 		return err
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if request.offset < 0 || request.offset > info.Size() {
+		return fmt.Errorf("requested offset %d is outside file size %d", request.offset, info.Size())
+	}
 	if _, err := file.Seek(request.offset, io.SeekStart); err != nil {
 		return err
 	}
-	_, err = io.Copy(conn, file)
-	return err
+	if _, err = io.Copy(conn, file); err != nil {
+		return fmt.Errorf("%w: %v", errTransferInterrupted, err)
+	}
+	return nil
 }
+
+var errTransferInterrupted = errors.New("attachment transfer interrupted")
 
 func (n *Node) Receive(ctx context.Context, outputDir string, onEvent func(ReceiveEvent)) error {
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
@@ -320,6 +353,17 @@ func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort
 	if err := waitContext(ctx, attachmentReadyDelay); err != nil {
 		return "", err
 	}
+	if attachment.Size < 0 {
+		return "", fmt.Errorf("attachment size cannot be negative: %d", attachment.Size)
+	}
+	var partialPath string
+	if attachment.Attr&0xff == FileRegular {
+		var err error
+		partialPath, err = attachmentPartialPath(outputDir, sender, attachment)
+		if err != nil {
+			return "", err
+		}
+	}
 	ports := []int{senderPort}
 	if senderPort != n.Port {
 		ports = append(ports, n.Port)
@@ -327,11 +371,14 @@ func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort
 	var lastErr error
 	for _, port := range ports {
 		for attempt := 1; attempt <= attachmentAttempts; attempt++ {
-			path, err := n.downloadAttachmentAttempt(ctx, sender, port, packetNo, attachment, outputDir)
+			path, err := n.downloadAttachmentAttempt(ctx, sender, port, packetNo, attachment, outputDir, partialPath)
 			if err == nil {
 				return path, nil
 			}
-			if !errors.Is(err, errEmptyTransfer) {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if attachment.Attr&0xff == FileDirectory && !errors.Is(err, errEmptyTransfer) {
 				return "", fmt.Errorf(
 					"download request to %s:%d (packet=%x file=%x): %w",
 					sender, port, packetNo, attachment.FileID, err,
@@ -346,14 +393,30 @@ func (n *Node) downloadAttachment(ctx context.Context, sender string, senderPort
 		}
 	}
 	return "", fmt.Errorf(
-		"attachment sender %s ports %v closed without data (packet=%x file=%x) after %d attempts each: %w",
+		"attachment download from %s ports %v remained incomplete (packet=%x file=%x) after %d attempts each: %w",
 		sender, ports, packetNo, attachment.FileID, attachmentAttempts, lastErr,
 	)
 }
 
 var errEmptyTransfer = errors.New("attachment sender closed without data")
 
-func (n *Node) downloadAttachmentAttempt(ctx context.Context, sender string, senderPort int, packetNo uint64, attachment Attachment, outputDir string) (string, error) {
+func (n *Node) downloadAttachmentAttempt(ctx context.Context, sender string, senderPort int, packetNo uint64, attachment Attachment, outputDir, partialPath string) (string, error) {
+	var offset int64
+	if attachment.Attr&0xff == FileRegular {
+		info, err := os.Lstat(partialPath)
+		switch {
+		case err == nil && !info.Mode().IsRegular():
+			return "", fmt.Errorf("partial download is not a regular file: %s", partialPath)
+		case err == nil && info.Size() <= attachment.Size:
+			offset = info.Size()
+		case err == nil:
+			if err := os.Truncate(partialPath, 0); err != nil {
+				return "", err
+			}
+		case !errors.Is(err, os.ErrNotExist):
+			return "", err
+		}
+	}
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort(sender, strconv.Itoa(senderPort)))
 	if err != nil {
@@ -373,44 +436,86 @@ func (n *Node) downloadAttachmentAttempt(ctx context.Context, sender string, sen
 	if attachment.Attr&0xff == FileDirectory {
 		command = CmdGetDirFiles
 	}
-	extra := []byte(fmt.Sprintf("%x:%x:0", packetNo, attachment.FileID))
+	extra := []byte(fmt.Sprintf("%x:%x:%x", packetNo, attachment.FileID, offset))
 	request := EncodePacket(n.Identity, n.nextPacketNo(), command, extra)
 	if _, err := conn.Write(request); err != nil {
 		return "", err
 	}
 	reader := bufio.NewReader(conn)
-	if _, err := reader.Peek(1); err != nil {
-		if errors.Is(err, io.EOF) {
-			return "", errEmptyTransfer
+	if offset < attachment.Size {
+		if _, err := reader.Peek(1); err != nil {
+			if errors.Is(err, io.EOF) {
+				return "", errEmptyTransfer
+			}
+			return "", err
 		}
-		return "", err
 	}
 	if CommandMode(command) == CmdGetDirFiles {
 		return receiveDirectoryStream(reader, outputDir)
+	}
+	file, err := os.OpenFile(partialPath, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	_, copyErr := io.CopyN(file, reader, attachment.Size-offset)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	if err := os.Chmod(partialPath, 0o644); err != nil {
+		return "", err
 	}
 	name, err := safeName(attachment.Name)
 	if err != nil {
 		return "", err
 	}
-	path, err := uniquePath(outputDir, name)
+	path, err := commitPartialFile(outputDir, name, partialPath)
 	if err != nil {
 		return "", err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return "", err
-	}
-	_, copyErr := io.CopyN(file, reader, attachment.Size)
-	closeErr := file.Close()
-	if copyErr != nil {
-		_ = os.Remove(path)
-		return "", copyErr
-	}
-	if closeErr != nil {
-		_ = os.Remove(path)
-		return "", closeErr
-	}
+	_ = os.Remove(filepath.Dir(partialPath))
 	return filepath.Clean(path), nil
+}
+
+func commitPartialFile(outputDir, name, partialPath string) (string, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		path, err := uniquePath(outputDir, name)
+		if err != nil {
+			return "", err
+		}
+		if err := os.Link(partialPath, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", err
+		}
+		if err := os.Remove(partialPath); err != nil {
+			return path, nil
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("cannot allocate final path for %q", name)
+}
+
+func attachmentPartialPath(outputDir, sender string, attachment Attachment) (string, error) {
+	name, err := safeName(attachment.Name)
+	if err != nil {
+		return "", err
+	}
+	partialDir := filepath.Join(outputDir, ".feiq-cli-partials")
+	if err := os.MkdirAll(partialDir, 0o700); err != nil {
+		return "", err
+	}
+	identity := fmt.Sprintf("%s\x00%s\x00%d\x00%d", sender, name, attachment.Size, attachment.ModTime)
+	digest := sha256.Sum256([]byte(identity))
+	return filepath.Join(partialDir, fmt.Sprintf("%x.part", digest)), nil
 }
 
 func waitContext(ctx context.Context, delay time.Duration) error {

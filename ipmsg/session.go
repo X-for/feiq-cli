@@ -52,6 +52,40 @@ type sessionOffer struct {
 	directory bool
 	done      chan error
 	once      sync.Once
+	timerMu   sync.Mutex
+	timer     *time.Timer
+}
+
+func (offer *sessionOffer) beginRequest() {
+	offer.timerMu.Lock()
+	defer offer.timerMu.Unlock()
+	if offer.timer != nil {
+		offer.timer.Stop()
+		offer.timer = nil
+	}
+}
+
+func (offer *sessionOffer) finishRequest(err error) {
+	if errors.Is(err, errTransferInterrupted) {
+		return
+	}
+	if err != nil {
+		offer.once.Do(func() { offer.done <- err })
+		return
+	}
+	offer.timerMu.Lock()
+	defer offer.timerMu.Unlock()
+	offer.timer = time.AfterFunc(750*time.Millisecond, func() {
+		offer.once.Do(func() { offer.done <- nil })
+	})
+}
+
+func (offer *sessionOffer) stopTimer() {
+	offer.timerMu.Lock()
+	defer offer.timerMu.Unlock()
+	if offer.timer != nil {
+		offer.timer.Stop()
+	}
 }
 
 // StartSession starts the shared UDP/TCP service used by interactive mode.
@@ -202,6 +236,7 @@ func (s *Session) SendPath(ctx context.Context, target, path string) error {
 	s.offers[key] = offer
 	s.offerMu.Unlock()
 	defer func() {
+		offer.stopTimer()
 		s.offerMu.Lock()
 		delete(s.offers, key)
 		s.offerMu.Unlock()
@@ -403,8 +438,12 @@ func (s *Session) handleTransferRequest(conn net.Conn) {
 		s.reportError(fmt.Errorf("no active attachment offer for %s (file %x)", remote.IP, request.fileID))
 		return
 	}
+	offer.beginRequest()
 	err = sendTransferData(conn, request, offer.path, offer.directory)
-	offer.once.Do(func() { offer.done <- err })
+	if err != nil && !errors.Is(err, errTransferInterrupted) {
+		s.reportError(err)
+	}
+	offer.finishRequest(err)
 }
 
 func (s *Session) reportError(err error) {

@@ -87,6 +87,52 @@ func TestSessionFileAndDirectoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionFileRoundTripResumesExistingPartial(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "resume.txt")
+	content := []byte("short12345")
+	if err := os.WriteFile(source, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := t.TempDir()
+	attachment := Attachment{Name: info.Name(), Size: info.Size(), ModTime: info.ModTime().Unix(), Attr: FileRegular}
+	partial, err := attachmentPartialPath(output, "127.0.0.1", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(partial, content[:5], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sender, _, senderErrors := startTestSession(t, testPort(t), t.TempDir())
+	receiver, receiverEvents, receiverErrors := startTestSession(t, testPort(t), output)
+	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(receiver.node.Port))
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	if err := sender.SendPath(ctx, target, source); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-receiverEvents:
+		if len(event.SavedPaths) != 1 {
+			t.Fatalf("unexpected saved paths: %#v", event.SavedPaths)
+		}
+		data, err := os.ReadFile(event.SavedPaths[0])
+		if err != nil || string(data) != string(content) {
+			t.Fatalf("received resumed file: data=%q err=%v", data, err)
+		}
+	case err := <-receiverErrors:
+		t.Fatal(err)
+	case err := <-senderErrors:
+		t.Fatal(err)
+	case <-ctx.Done():
+		t.Fatal("resumed transfer timed out")
+	}
+}
+
 func TestSearchPeersFiltersAndExpires(t *testing.T) {
 	now := time.Now()
 	session := &Session{peers: map[string]Peer{
