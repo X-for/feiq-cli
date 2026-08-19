@@ -2,6 +2,7 @@ package ipmsg
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -429,6 +430,60 @@ func TestSendTransferDataRejectsOffsetBeyondFile(t *testing.T) {
 	err := sendTransferData(server, transferRequest{command: CmdGetFileData, offset: 6}, path, false)
 	if err == nil || !strings.Contains(err.Error(), "outside file size") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestReceiveDirectoryAttachmentPublishesOnlyAfterCompletion(t *testing.T) {
+	var stream bytes.Buffer
+	if err := writeDirHeader(&stream, dirRecord{Name: "project", Attr: FileDirectory}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDirHeader(&stream, dirRecord{Name: "file.txt", Size: 4, Attr: FileRegular}); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteString("data")
+	if err := writeDirHeader(&stream, dirRecord{Name: ".", Attr: FileRetParent}); err != nil {
+		t.Fatal(err)
+	}
+	output := t.TempDir()
+	saved, err := receiveDirectoryAttachment(&stream, output, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved != filepath.Join(output, "project") {
+		t.Fatalf("saved = %s", saved)
+	}
+	if data, err := os.ReadFile(filepath.Join(saved, "file.txt")); err != nil || string(data) != "data" {
+		t.Fatalf("received data = %q, err = %v", data, err)
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "project" {
+		t.Fatalf("output entries = %#v", entries)
+	}
+}
+
+func TestReceiveDirectoryAttachmentRemovesIncompleteStaging(t *testing.T) {
+	var stream bytes.Buffer
+	if err := writeDirHeader(&stream, dirRecord{Name: "project", Attr: FileDirectory}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDirHeader(&stream, dirRecord{Name: "file.txt", Size: 4, Attr: FileRegular}); err != nil {
+		t.Fatal(err)
+	}
+	stream.WriteString("x")
+	output := t.TempDir()
+	if _, err := receiveDirectoryAttachment(&stream, output, "project"); err == nil {
+		t.Fatal("expected incomplete directory error")
+	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("incomplete directory became visible: %#v", entries)
 	}
 }
 

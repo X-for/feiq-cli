@@ -451,7 +451,7 @@ func (n *Node) downloadAttachmentAttempt(ctx context.Context, sender string, sen
 		}
 	}
 	if CommandMode(command) == CmdGetDirFiles {
-		return receiveDirectoryStream(reader, outputDir)
+		return receiveDirectoryAttachment(reader, outputDir, attachment.Name)
 	}
 	file, err := os.OpenFile(partialPath, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -482,6 +482,30 @@ func (n *Node) downloadAttachmentAttempt(ctx context.Context, sender string, sen
 	}
 	_ = os.Remove(filepath.Dir(partialPath))
 	return filepath.Clean(path), nil
+}
+
+func receiveDirectoryAttachment(reader io.Reader, outputDir, offeredName string) (string, error) {
+	name, err := safeName(offeredName)
+	if err != nil {
+		return "", err
+	}
+	staging, err := os.MkdirTemp(outputDir, ".feiq-cli-directory-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(staging)
+	receivedRoot, err := receiveDirectoryStream(reader, staging)
+	if err != nil {
+		return "", err
+	}
+	finalPath, err := uniquePath(outputDir, name)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(receivedRoot, finalPath); err != nil {
+		return "", err
+	}
+	return filepath.Clean(finalPath), nil
 }
 
 func commitPartialFile(outputDir, name, partialPath string) (string, error) {
