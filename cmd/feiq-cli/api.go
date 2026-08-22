@@ -523,10 +523,9 @@ func (app *webApp) handleSendPath(writer http.ResponseWriter, request *http.Requ
 		writeAPIError(writer, http.StatusBadRequest, "path must be a regular file or directory")
 		return
 	}
-	if body.Kind != "" && body.Kind != kind {
-		writeAPIError(writer, http.StatusBadRequest, "selected path does not match kind")
-		return
-	}
+	// Kind is retained in the request for compatibility with older CLI and Web
+	// clients, but the filesystem is authoritative. In particular, a manually
+	// entered browser path cannot reliably know its type before this stat.
 	operationID, err := app.startPathTransfer(body.To, resolvedPath, kind, "")
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, err.Error())

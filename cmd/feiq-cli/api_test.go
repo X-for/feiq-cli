@@ -184,6 +184,30 @@ func TestWebSendPathRejectsOutsideRootAndAllowsInside(t *testing.T) {
 	}
 }
 
+func TestWebSendPathUsesActualPathKind(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "documents")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	session := &fakeWebSession{pathCh: make(chan struct{})}
+	app := newTestWebAppAtRoot(t, session, root)
+
+	// A manually entered path may carry a stale browser-side kind. The server
+	// can inspect the path itself, so it must not reject an otherwise valid path.
+	body, _ := json.Marshal(map[string]string{"to": "192.168.110.150", "path": directory, "kind": "file"})
+	response := httptest.NewRecorder()
+	app.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/send-path", bytes.NewReader(body)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-session.pathCh:
+	case <-time.After(time.Second):
+		t.Fatal("directory send did not start")
+	}
+}
+
 func TestWebUploadRemoved(t *testing.T) {
 	app := newTestWebApp(t, &fakeWebSession{})
 	response := httptest.NewRecorder()

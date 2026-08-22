@@ -82,10 +82,10 @@ button { cursor: pointer; }
 .path-picker button:not(:disabled):hover { border-color: rgba(88,214,170,.38); color: var(--accent); }
 .path-toolbar { display: flex; align-items: end; gap: 8px; }
 .path-toolbar label { display: grid; flex: 1; min-width: 0; gap: 5px; color: var(--muted); font-size: 11px; }
-.path-toolbar select, .path-manual input, .path-manual select { width: 100%; padding: 8px 10px; }
+.path-toolbar select, .path-manual input { width: 100%; padding: 8px 10px; }
 .path-breadcrumbs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; color: #617783; white-space: nowrap; }
 .path-breadcrumbs button { flex: 0 0 auto; padding: 5px 8px; border-color: transparent; background: transparent; font-size: 12px; }
-.path-manual { display: grid; grid-template-columns: 90px minmax(120px, 1fr) auto auto; gap: 8px; }
+.path-manual { display: grid; grid-template-columns: minmax(120px, 1fr) auto auto; gap: 8px; }
 .path-list { flex: 1 1 180px; min-height: 96px; overflow: auto; border: 1px solid var(--border); border-radius: 11px; background: rgba(8,15,22,.45); }
 .path-state { margin: 0; padding: 28px 16px; color: var(--muted); text-align: center; font-size: 12px; }
 .path-entry { display: flex; align-items: stretch; min-width: 0; border-bottom: 1px solid rgba(174,203,218,.07); }
@@ -164,7 +164,7 @@ button { cursor: pointer; }
   .path-list { flex: 0 0 min(180px, 34dvh); min-height: 110px; }
   .path-toolbar { align-items: stretch; flex-wrap: wrap; }
   .path-toolbar label { flex-basis: 100%; }
-  .path-manual { grid-template-columns: 88px minmax(0, 1fr); }
+  .path-manual { grid-template-columns: minmax(0, 1fr) auto auto; }
   .path-manual button { width: 100%; }
 }
 

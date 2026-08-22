@@ -35,6 +35,8 @@ type StreamEvent = Partial<Message> & {
   error?: string
 }
 
+type SelectedPath = Pick<PathEntry, 'name' | 'path'>
+
 const contacts = ref<Contact[]>([])
 const current = ref<Contact | null>(null)
 const messages = ref<Message[]>([])
@@ -47,9 +49,8 @@ const notice = ref('')
 const showPathPanel = ref(false)
 const pathListing = ref<PathListing | null>(null)
 const pathLoading = ref(false)
-const selectedPath = ref<PathEntry | null>(null)
+const selectedPath = ref<SelectedPath | null>(null)
 const manualPath = ref('')
-const serverPathKind = ref<'file' | 'dir'>('file')
 const messageList = ref<HTMLElement | null>(null)
 let events: EventSource | null = null
 let refreshTimer: number | undefined
@@ -158,10 +159,9 @@ async function togglePathPicker() {
   await loadPaths()
 }
 
-function selectPath(entry: PathEntry) {
+function selectPath(entry: SelectedPath) {
   selectedPath.value = entry
   manualPath.value = entry.path
-  serverPathKind.value = entry.kind
 }
 
 function selectCurrentDirectory() {
@@ -169,8 +169,6 @@ function selectCurrentDirectory() {
   selectPath({
     name: pathListing.value.path.split('/').filter(Boolean).at(-1) || '/',
     path: pathListing.value.path,
-    kind: 'dir',
-    size: 0,
   })
 }
 
@@ -180,8 +178,6 @@ function selectManualPath() {
   selectedPath.value = {
     name: path.split('/').filter(Boolean).at(-1) || path,
     path,
-    kind: serverPathKind.value,
-    size: 0,
   }
 }
 
@@ -192,7 +188,7 @@ async function sendServerPath() {
     await api('/api/send-path', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: current.value.ip, path: selection.path, kind: selection.kind }),
+      body: JSON.stringify({ to: current.value.ip, path: selection.path }),
     })
     selectedPath.value = null
     manualPath.value = ''
@@ -351,10 +347,6 @@ onBeforeUnmount(() => {
           </nav>
 
           <div class="path-manual">
-            <select v-model="serverPathKind" aria-label="手动路径类型">
-              <option value="file">文件</option>
-              <option value="dir">目录</option>
-            </select>
             <input v-model="manualPath" aria-label="手动路径" placeholder="~/Desktop/example" @keyup.enter="selectManualPath" />
             <button type="button" class="ghost-button" @click="loadPaths(manualPath)">定位目录</button>
             <button type="button" class="ghost-button" data-test="select-manual-path" @click="selectManualPath">选择路径</button>

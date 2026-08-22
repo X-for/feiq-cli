@@ -100,7 +100,7 @@ describe('App server path picker', () => {
     wrapper.unmount()
   })
 
-  it('selects a server file and sends its path and kind', async () => {
+  it('selects a server file and lets the server determine its kind', async () => {
     const wrapper = await mountConversation()
     await wrapper.get('[data-test="open-path-picker"]').trigger('click')
     await flushPromises()
@@ -113,7 +113,26 @@ describe('App server path picker', () => {
       body: JSON.stringify({
         to: contact.ip,
         path: '/Users/zaq/photo.png',
-        kind: 'file',
+      }),
+    }))
+    wrapper.unmount()
+  })
+
+  it('sends a manually entered path without guessing its kind', async () => {
+    const wrapper = await mountConversation()
+    await wrapper.get('[data-test="open-path-picker"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[aria-label="手动路径"]').setValue('/Users/zaq/Documents')
+    await wrapper.get('[data-test="select-manual-path"]').trigger('click')
+    await wrapper.get('[data-test="send-selected-path"]').trigger('click')
+    await flushPromises()
+
+    expect(fetch).toHaveBeenCalledWith('/api/send-path', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        to: contact.ip,
+        path: '/Users/zaq/Documents',
       }),
     }))
     wrapper.unmount()
